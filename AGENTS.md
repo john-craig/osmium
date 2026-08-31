@@ -12,6 +12,13 @@ networking, or lifecycle guarantees required by the specification. The
 proposal, design, and task list must identify the executable test command and
 the behavior it verifies.
 
+When a new service supports administrator or other privileged credentials, the
+OpenSpec change must also include a secure, one-time credential bootstrap
+workflow whenever the service and deployment model make this practical. The
+workflow should consume credentials at runtime, persist its completion state,
+avoid repeated creation or rotation, and cover the bootstrap behavior in the
+service's MicroVM integration testcase.
+
 Before considering the change verified, execute the MicroVM testcase and report
 its result. Prefer exposing it as a flake check, for example:
 
