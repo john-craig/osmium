@@ -1,4 +1,4 @@
-{ pkgs, module, microvm }:
+{ pkgs, module, microvm, healthchecks }:
 
 pkgs.testers.runNixOSTest {
   name = "mythoclast-gitea";
@@ -53,7 +53,12 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     vm.start(allow_reboot=True)
     vm.wait_for_unit("gitea.service")
-    vm.wait_for_open_port(3000)
+    ${healthchecks.http {
+      name = "gitea-http-healthz";
+      port = 3000;
+      path = "/api/healthz";
+      expectedStatus = 200;
+    }}
     vm.succeed("curl --fail http://127.0.0.1:3000/api/healthz")
     vm.succeed("su -s /bin/sh gitea -c 'gitea --config /var/lib/gitea/custom/conf/app.ini admin user create --username test --password test-password --email test@example.com --admin --must-change-password=false'")
     vm.succeed("curl --fail --user test:test-password -X POST http://127.0.0.1:3000/api/v1/user/repos -H 'Content-Type: application/json' -d '{\"name\":\"persistent\"}'")

@@ -64,9 +64,21 @@ Run the Gitea MicroVM integration test:
 nix build .#checks.x86_64-linux.gitea --print-build-logs
 ```
 
-This test boots Gitea, creates a repository through the HTTP API, restarts the
-guest, and verifies the repository remains available and the Gitea state
-remains owned by `gitea`.
+This test runs a guest-local HTTP healthcheck against Gitea's
+`/api/healthz` endpoint on port `3000`, requiring HTTP `200`. It then creates a
+repository through the HTTP API, restarts the guest, and verifies the
+repository remains available and the Gitea state remains owned by `gitea`.
+
+Service tests can reuse the structured helper in `tests/healthchecks.nix`:
+
+```nix
+healthchecks.http {
+  name = "service-http-health";
+  port = 8080;
+  path = "/healthz";
+  expectedStatus = 200;
+}
+```
 
 The test uses a tmpfs root and a separate persistent ext4 volume. It writes
 state, reboots the guest, and verifies that the state remains available.
