@@ -40,6 +40,33 @@
           };
         }
       ];
+
+      giteaGuestModules = [
+        microvm.nixosModules.microvm
+        self.nixosModules.default
+        {
+          networking.hostName = "mythoclast-gitea";
+          system.stateVersion = "25.05";
+
+          microvm = {
+            hypervisor = "qemu";
+            vcpu = 2;
+            mem = 1024;
+            interfaces = [ {
+              type = "user";
+              id = "gitea";
+              mac = "02:00:00:00:00:02";
+            } ];
+          };
+
+          services.mythoclast.gitea = {
+            enable = true;
+            hostHttpPort = 3001;
+            hostSshPort = 2223;
+            settings.service.DISABLE_REGISTRATION = false;
+          };
+        }
+      ];
     in
     {
       nixosModules.default = {
@@ -86,6 +113,11 @@
         ];
       };
 
+      nixosConfigurations.gitea-guest = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = giteaGuestModules;
+      };
+
       checks = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
@@ -98,6 +130,11 @@
 
           persistence = import ./tests/persistence.nix {
             inherit pkgs;
+            module = self.nixosModules.default;
+          };
+
+          gitea = import ./tests/gitea.nix {
+            inherit pkgs microvm;
             module = self.nixosModules.default;
           };
         });
