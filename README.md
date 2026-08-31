@@ -59,6 +59,22 @@ The bootstrap creates the administrator after Gitea starts and records a
 completion marker inside `stateDir`. It does not rotate or change the account
 on later starts.
 
+Administrator credential rotation can be enabled with a replacement secret:
+
+```nix
+services.mythoclast.gitea.admin.rotation = {
+  enable = true;
+  passwordFile = config.sops.secrets.gitea-admin-rotation-password.path;
+  maxAge = 90 * 24 * 60 * 60;
+  checkInterval = 60 * 60;
+};
+```
+
+A changed replacement credential is applied during configuration activation.
+The periodic check also rotates credentials after `maxAge` and retries failed
+rotations. A failed rotation leaves the current credential usable and does not
+record success; disabling rotation does not revert a completed rotation.
+
 ## Development
 
 Enter the development shell with `direnv`, or run:

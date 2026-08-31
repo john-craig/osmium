@@ -5,6 +5,7 @@ let
   serverSettings = cfg.settings.server or { };
   databaseSettings = cfg.settings.database or { };
   adminBootstrapMarker = "${cfg.stateDir}/.mythoclast-admin-bootstrap-complete";
+  adminRotationState = "${cfg.stateDir}/.mythoclast-admin-rotation";
 in
 {
   options.services.mythoclast.gitea = {
@@ -72,6 +73,28 @@ in
         default = null;
         description = "Runtime file containing the initial administrator password.";
       };
+
+      rotation = {
+        enable = lib.mkEnableOption "automatic Gitea administrator credential rotation";
+
+        passwordFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          description = "Runtime file containing the desired replacement administrator password.";
+        };
+
+        maxAge = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 90 * 24 * 60 * 60;
+          description = "Maximum administrator credential age in seconds.";
+        };
+
+        checkInterval = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 60 * 60;
+          description = "Interval between administrator credential rotation checks in seconds.";
+        };
+      };
     };
   };
 
@@ -88,6 +111,14 @@ in
       {
         assertion = !cfg.admin.enable || cfg.admin.passwordFile != null;
         message = "services.mythoclast.gitea.admin.passwordFile is required when administrator bootstrap is enabled.";
+      }
+      {
+        assertion = !cfg.admin.rotation.enable || cfg.admin.enable;
+        message = "Gitea administrator credential rotation requires administrator bootstrap to be enabled.";
+      }
+      {
+        assertion = !cfg.admin.rotation.enable || cfg.admin.rotation.passwordFile != null;
+        message = "services.mythoclast.gitea.admin.rotation.passwordFile is required when credential rotation is enabled.";
       }
     ];
 
@@ -157,6 +188,83 @@ in
           install -m 0640 /dev/null ${lib.escapeShellArg adminBootstrapMarker}
         '';
       };
+    };
+
+    systemd.services.mythoclast-gitea-admin-rotation = lib.mkIf cfg.admin.rotation.enable {
+      description = "Rotate the Mythoclast Gitea administrator credential";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "gitea.service" "mythoclast-gitea-admin-bootstrap.service" ];
+      requires = [ "gitea.service" "mythoclast-gitea-admin-bootstrap.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = "gitea";
+        Group = "gitea";
+        UMask = "0077";
+        ExecStart = pkgs.writeShellScript "mythoclast-gitea-admin-rotation" ''
+          set -eu
+          state=${lib.escapeShellArg adminRotationState}
+          password_file=${lib.escapeShellArg cfg.admin.rotation.passwordFile}
+          now=$(date +%s)
+          password=$(cat "$password_file")
+          if [ -z "$password" ]; then
+            echo "Gitea administrator rotation password file is empty" >&2
+            exit 1
+          fi
+
+          salt=
+          applied_at=0
+          applied_hash=
+          if [ -f "$state" ]; then
+            while IFS='=' read -r key value; do
+              case "$key" in
+                salt) salt=$value ;;
+                applied_at) applied_at=$value ;;
+                applied_hash) applied_hash=$value ;;
+              esac
+            done < "$state"
+          fi
+
+          if [ -z "$salt" ]; then
+            salt=$(head -c 32 /dev/urandom | base64 -w 0)
+          fi
+          candidate_hash=$(printf '%s%s' "$salt" "$password" | sha256sum | cut -d ' ' -f 1)
+
+          if [ "$candidate_hash" = "$applied_hash" ]; then
+            if [ "$((now - applied_at))" -lt ${toString cfg.admin.rotation.maxAge} ]; then
+              exit 0
+            fi
+            echo "Gitea administrator rotation is due, but the replacement credential is unchanged" >&2
+            exit 1
+          fi
+
+          ${pkgs.gitea}/bin/gitea --config ${lib.escapeShellArg "${cfg.stateDir}/custom/conf/app.ini"} admin user change-password \
+            --username ${lib.escapeShellArg cfg.admin.username} \
+            --password "$password" \
+            --must-change-password=false
+
+          tmp=$(mktemp "''${state}.XXXXXX")
+          trap 'rm -f "$tmp"' EXIT
+          printf 'salt=%s\napplied_at=%s\napplied_hash=%s\n' "$salt" "$now" "$candidate_hash" > "$tmp"
+          chmod 0640 "$tmp"
+          mv "$tmp" "$state"
+        '';
+      };
+    };
+
+    systemd.timers.mythoclast-gitea-admin-rotation = lib.mkIf cfg.admin.rotation.enable {
+      description = "Check the Mythoclast Gitea administrator credential age";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "${toString cfg.admin.rotation.checkInterval}s";
+        OnUnitActiveSec = "${toString cfg.admin.rotation.checkInterval}s";
+        Unit = "mythoclast-gitea-admin-rotation.service";
+      };
+    };
+
+    system.activationScripts.mythoclast-gitea-admin-rotation = lib.mkIf cfg.admin.rotation.enable {
+      text = ''
+        ${pkgs.systemd}/bin/systemctl restart mythoclast-gitea-admin-rotation.service || true
+      '';
     };
 
   } // lib.optionalAttrs (options ? microvm) {

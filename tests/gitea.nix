@@ -52,6 +52,12 @@ pkgs.testers.runNixOSTest {
         username = "bootstrap-admin";
         email = "bootstrap-admin@example.com";
         passwordFile = "/etc/gitea-admin-password";
+        rotation = {
+          enable = true;
+          passwordFile = "/run/gitea-admin-rotation-password";
+          maxAge = 3600;
+          checkInterval = 3600;
+        };
       };
     };
 
@@ -76,12 +82,21 @@ pkgs.testers.runNixOSTest {
     vm.succeed("curl --fail http://127.0.0.1:3000/api/healthz")
     vm.succeed("curl --fail --user bootstrap-admin:test-admin-password http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == true'")
     vm.succeed("curl --fail --user bootstrap-admin:test-admin-password -X POST http://127.0.0.1:3000/api/v1/user/repos -H 'Content-Type: application/json' -d '{\"name\":\"persistent\"}'")
+    vm.succeed("printf 'rotated-admin-password\\n' > /run/gitea-admin-rotation-password")
+    vm.succeed("systemctl restart mythoclast-gitea-admin-rotation.service")
+    vm.fail("curl --fail --user bootstrap-admin:test-admin-password http://127.0.0.1:3000/api/v1/user")
+    vm.succeed("curl --fail --user bootstrap-admin:rotated-admin-password http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == true'")
+    vm.succeed("rm /run/gitea-admin-rotation-password")
+    vm.fail("systemctl restart mythoclast-gitea-admin-rotation.service", timeout=10)
+    vm.succeed("curl --fail --user bootstrap-admin:rotated-admin-password http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == true'")
+    vm.succeed("printf 'recovered-admin-password\\n' > /run/gitea-admin-rotation-password && systemctl restart mythoclast-gitea-admin-rotation.service")
+    vm.succeed("curl --fail --user bootstrap-admin:recovered-admin-password http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == true'")
     vm.shutdown()
     vm.start()
     vm.wait_for_unit("gitea.service")
     vm.wait_for_open_port(3000)
-    vm.succeed("curl --fail --user bootstrap-admin:test-admin-password http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == true'")
-    vm.succeed("curl --fail --user bootstrap-admin:test-admin-password http://127.0.0.1:3000/api/v1/user/repos | jq -e 'any(.[]; .name == \"persistent\")'")
+    vm.succeed("curl --fail --user bootstrap-admin:recovered-admin-password http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == true'")
+    vm.succeed("curl --fail --user bootstrap-admin:recovered-admin-password http://127.0.0.1:3000/api/v1/user/repos | jq -e 'any(.[]; .name == \"persistent\")'")
     vm.succeed("test -e /var/lib/gitea/.mythoclast-admin-bootstrap-complete")
     vm.succeed("test \"$(stat -c %U /var/lib/gitea)\" = gitea")
   '';
