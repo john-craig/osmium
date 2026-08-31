@@ -19,6 +19,11 @@ workflow should consume credentials at runtime, persist its completion state,
 avoid repeated creation or rotation, and cover the bootstrap behavior in the
 service's MicroVM integration testcase.
 
+When a service supports credential rotation, the OpenSpec change must always
+include rotation triggered by a changed secret-file value. The rotation path
+must consume the replacement credential at runtime and cover the changed-secret
+trigger in the service's integration testcase.
+
 Before considering the change verified, execute the MicroVM testcase and report
 its result. Prefer exposing it as a flake check, for example:
 
