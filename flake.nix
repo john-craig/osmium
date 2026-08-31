@@ -9,9 +9,12 @@
 
     microvm.url = "github:microvm-nix/microvm.nix";
     microvm.inputs.nixpkgs.follows = "nixpkgs";
+
+    sops-nix.url = "github:Mic92/sops-nix";
+    sops-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, impermanence, microvm }:
+  outputs = { self, nixpkgs, impermanence, microvm, sops-nix }:
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
@@ -72,6 +75,7 @@
       nixosModules.default = {
         imports = [
           impermanence.nixosModules.impermanence
+          sops-nix.nixosModules.sops
           ./modules
         ];
       };

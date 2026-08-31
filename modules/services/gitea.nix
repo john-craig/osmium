@@ -1,9 +1,10 @@
-{ config, lib, options, ... }:
+{ config, lib, options, pkgs, ... }:
 
 let
   cfg = config.services.mythoclast.gitea;
   serverSettings = cfg.settings.server or { };
   databaseSettings = cfg.settings.database or { };
+  adminBootstrapMarker = "${cfg.stateDir}/.mythoclast-admin-bootstrap-complete";
 in
 {
   options.services.mythoclast.gitea = {
@@ -50,6 +51,28 @@ in
       default = { };
       description = "Additional declarative settings for Gitea.";
     };
+
+    admin = {
+      enable = lib.mkEnableOption "the initial Gitea administrator bootstrap";
+
+      username = lib.mkOption {
+        type = lib.types.str;
+        default = "admin";
+        description = "Username for the initial Gitea administrator.";
+      };
+
+      email = lib.mkOption {
+        type = lib.types.str;
+        default = "admin@localhost";
+        description = "Email address for the initial Gitea administrator.";
+      };
+
+      passwordFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Runtime file containing the initial administrator password.";
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable ({
@@ -61,6 +84,10 @@ in
       {
         assertion = cfg.hostHttpPort != cfg.hostSshPort;
         message = "Gitea HTTP and SSH host ports must be different.";
+      }
+      {
+        assertion = !cfg.admin.enable || cfg.admin.passwordFile != null;
+        message = "services.mythoclast.gitea.admin.passwordFile is required when administrator bootstrap is enabled.";
       }
     ];
 
@@ -105,6 +132,32 @@ in
         mode = "0750";
       }
     ];
+
+    systemd.services.mythoclast-gitea-admin-bootstrap = lib.mkIf cfg.admin.enable {
+      description = "Bootstrap the Mythoclast Gitea administrator";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "gitea.service" ];
+      requires = [ "gitea.service" ];
+      unitConfig.ConditionPathExists = "!${adminBootstrapMarker}";
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = "gitea";
+        Group = "gitea";
+        UMask = "0077";
+        ExecStart = pkgs.writeShellScript "mythoclast-gitea-admin-bootstrap" ''
+          set -eu
+          password=$(cat ${lib.escapeShellArg cfg.admin.passwordFile})
+          ${pkgs.gitea}/bin/gitea --config ${lib.escapeShellArg "${cfg.stateDir}/custom/conf/app.ini"} admin user create \
+            --username ${lib.escapeShellArg cfg.admin.username} \
+            --password "$password" \
+            --email ${lib.escapeShellArg cfg.admin.email} \
+            --admin \
+            --must-change-password=false
+          install -m 0640 /dev/null ${lib.escapeShellArg adminBootstrapMarker}
+        '';
+      };
+    };
 
   } // lib.optionalAttrs (options ? microvm) {
     microvm.forwardPorts = [

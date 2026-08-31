@@ -38,6 +38,27 @@ External database support and reverse-proxy/TLS configuration are intentionally
 left for later changes. Use `databasePasswordFile` for a secret file rather
 than putting a password in the Nix configuration.
 
+Enable one-time administrator bootstrap with a runtime password file:
+
+```nix
+sops.secrets.gitea-admin-password = {
+  sopsFile = ./secrets.yaml;
+  owner = "gitea";
+  group = "gitea";
+  mode = "0400";
+};
+
+services.mythoclast.gitea.admin = {
+  enable = true;
+  username = "admin";
+  passwordFile = config.sops.secrets.gitea-admin-password.path;
+};
+```
+
+The bootstrap creates the administrator after Gitea starts and records a
+completion marker inside `stateDir`. It does not rotate or change the account
+on later starts.
+
 ## Development
 
 Enter the development shell with `direnv`, or run:

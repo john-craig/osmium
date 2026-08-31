@@ -47,12 +47,26 @@ pkgs.testers.runNixOSTest {
       hostHttpPort = 3001;
       hostSshPort = 2223;
       settings.service.DISABLE_REGISTRATION = false;
+      admin = {
+        enable = true;
+        username = "bootstrap-admin";
+        email = "bootstrap-admin@example.com";
+        passwordFile = "/etc/gitea-admin-password";
+      };
+    };
+
+    environment.etc."gitea-admin-password" = {
+      text = "test-admin-password\n";
+      mode = "0400";
+      user = "gitea";
+      group = "gitea";
     };
   };
 
   testScript = ''
     vm.start(allow_reboot=True)
     vm.wait_for_unit("gitea.service")
+    vm.wait_for_unit("mythoclast-gitea-admin-bootstrap.service")
     ${healthchecks.http {
       name = "gitea-http-healthz";
       port = 3000;
@@ -60,13 +74,15 @@ pkgs.testers.runNixOSTest {
       expectedStatus = 200;
     }}
     vm.succeed("curl --fail http://127.0.0.1:3000/api/healthz")
-    vm.succeed("su -s /bin/sh gitea -c 'gitea --config /var/lib/gitea/custom/conf/app.ini admin user create --username test --password test-password --email test@example.com --admin --must-change-password=false'")
-    vm.succeed("curl --fail --user test:test-password -X POST http://127.0.0.1:3000/api/v1/user/repos -H 'Content-Type: application/json' -d '{\"name\":\"persistent\"}'")
+    vm.succeed("curl --fail --user bootstrap-admin:test-admin-password http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == true'")
+    vm.succeed("curl --fail --user bootstrap-admin:test-admin-password -X POST http://127.0.0.1:3000/api/v1/user/repos -H 'Content-Type: application/json' -d '{\"name\":\"persistent\"}'")
     vm.shutdown()
     vm.start()
     vm.wait_for_unit("gitea.service")
     vm.wait_for_open_port(3000)
-    vm.succeed("curl --fail --user test:test-password http://127.0.0.1:3000/api/v1/user/repos | jq -e 'any(.[]; .name == \"persistent\")'")
+    vm.succeed("curl --fail --user bootstrap-admin:test-admin-password http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == true'")
+    vm.succeed("curl --fail --user bootstrap-admin:test-admin-password http://127.0.0.1:3000/api/v1/user/repos | jq -e 'any(.[]; .name == \"persistent\")'")
+    vm.succeed("test -e /var/lib/gitea/.mythoclast-admin-bootstrap-complete")
     vm.succeed("test \"$(stat -c %U /var/lib/gitea)\" = gitea")
   '';
 }
