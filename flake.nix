@@ -139,6 +139,7 @@
 
           gitea = import ./tests/gitea.nix {
             inherit pkgs microvm;
+            lib = nixpkgs.lib;
             module = self.nixosModules.default;
             healthchecks = import ./tests/healthchecks.nix { lib = nixpkgs.lib; };
           };

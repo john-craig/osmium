@@ -1,4 +1,49 @@
-{ pkgs, module, microvm, healthchecks }:
+{ pkgs, lib, module, microvm, healthchecks }:
+
+let
+  evaluationBase = {
+    system.stateVersion = "25.05";
+    services.mythoclast.gitea = {
+      enable = true;
+      admin = {
+        enable = true;
+        passwordFile = "/etc/gitea-admin-password";
+      };
+    };
+  };
+  evaluates = extra:
+    (builtins.tryEval ((lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [ module evaluationBase extra ];
+    }).config.system.build.toplevel)).success;
+  evaluationUser = username: {
+    username = username;
+    email = "${username}@example.com";
+    passwordFile = "/run/${username}-password";
+  };
+in
+assert !evaluates {
+  services.mythoclast.gitea.users = {
+    first = evaluationUser "duplicate-user";
+    second = evaluationUser "duplicate-user";
+  };
+};
+assert !evaluates {
+  services.mythoclast.gitea.organizations.example = {
+    name = "example-org";
+    owner = "missing-user";
+  };
+};
+assert !evaluates {
+  services.mythoclast.gitea.organizations.example = {
+    name = "example-org";
+    owner = "admin";
+    visibility = "invalid";
+  };
+};
+assert !evaluates {
+  services.mythoclast.gitea.users.admin = evaluationUser "admin";
+};
 
 pkgs.testers.runNixOSTest {
   name = "mythoclast-gitea";
@@ -47,6 +92,17 @@ pkgs.testers.runNixOSTest {
       hostHttpPort = 3001;
       hostSshPort = 2223;
       settings.service.DISABLE_REGISTRATION = false;
+      users.project-user = {
+        username = "project-user";
+        email = "project-user@example.com";
+        passwordFile = "/run/gitea-project-user-password";
+      };
+      organizations.project = {
+        name = "project-org";
+        owner = "project-user";
+        description = "Declarative project organization";
+        visibility = "private";
+      };
       admin = {
         enable = true;
         username = "bootstrap-admin";
@@ -82,6 +138,25 @@ pkgs.testers.runNixOSTest {
     vm.succeed("curl --fail http://127.0.0.1:3000/api/healthz")
     vm.succeed("curl --fail --user bootstrap-admin:test-admin-password http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == true'")
     vm.succeed("curl --fail --user bootstrap-admin:test-admin-password -X POST http://127.0.0.1:3000/api/v1/user/repos -H 'Content-Type: application/json' -d '{\"name\":\"persistent\"}'")
+    vm.succeed("printf 'project-user-password\\n' > /run/gitea-project-user-password")
+    vm.succeed("systemctl reset-failed mythoclast-gitea-identities.service && systemctl start mythoclast-gitea-identities.service")
+    vm.succeed("curl --fail --user project-user:project-user-password http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == false'")
+    vm.succeed("curl --fail --user project-user:project-user-password http://127.0.0.1:3000/api/v1/orgs/project-org | jq -e '.username == \"project-org\" and .visibility == \"private\"'")
+    vm.succeed("test -e /var/lib/gitea/.mythoclast-user-project-user")
+    vm.succeed("printf 'project-user-rotated\\n' > /run/gitea-project-user-password && systemctl restart mythoclast-gitea-identities.service")
+    vm.fail("curl --fail --user project-user:project-user-password http://127.0.0.1:3000/api/v1/user")
+    vm.succeed("curl --fail --user project-user:project-user-rotated http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == false'")
+    vm.succeed("curl --fail --user project-user:project-user-rotated http://127.0.0.1:3000/api/v1/orgs/project-org | jq -e '.username == \"project-org\"'")
+    vm.succeed("printf '\\n' > /run/gitea-project-user-password")
+    vm.fail("systemctl restart mythoclast-gitea-identities.service")
+    vm.succeed("curl --fail --user project-user:project-user-rotated http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == false'")
+    vm.succeed("printf 'project-user-recovered\\n' > /run/gitea-project-user-password && systemctl restart mythoclast-gitea-identities.service")
+    vm.succeed("curl --fail --user project-user:project-user-recovered http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == false'")
+    vm.succeed("runuser -u gitea -- gitea --config /var/lib/gitea/custom/conf/app.ini admin user create --username unmanaged-user --password unmanaged-password --email unmanaged@example.com --must-change-password=false")
+    vm.succeed("curl --fail --user bootstrap-admin:test-admin-password -X POST http://127.0.0.1:3000/api/v1/admin/users/bootstrap-admin/orgs -H 'Content-Type: application/json' -d '{\"username\":\"unmanaged-org\",\"description\":\"Unmanaged organization\",\"visibility\":\"private\"}'")
+    vm.succeed("systemctl reset-failed mythoclast-gitea-identities.service && systemctl start mythoclast-gitea-identities.service")
+    vm.succeed("curl --fail --user unmanaged-user:unmanaged-password http://127.0.0.1:3000/api/v1/user | jq -e '.login == \"unmanaged-user\" and .is_admin == false'")
+    vm.succeed("curl --fail --user bootstrap-admin:test-admin-password http://127.0.0.1:3000/api/v1/orgs/unmanaged-org | jq -e '.username == \"unmanaged-org\"'")
     vm.succeed("printf 'rotated-admin-password\\n' > /run/gitea-admin-rotation-password")
     vm.succeed("systemctl restart mythoclast-gitea-admin-rotation.service")
     vm.fail("curl --fail --user bootstrap-admin:test-admin-password http://127.0.0.1:3000/api/v1/user")
@@ -98,6 +173,8 @@ pkgs.testers.runNixOSTest {
     vm.succeed("curl --fail --user bootstrap-admin:recovered-admin-password http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == true'")
     vm.succeed("curl --fail --user bootstrap-admin:recovered-admin-password http://127.0.0.1:3000/api/v1/user/repos | jq -e 'any(.[]; .name == \"persistent\")'")
     vm.succeed("test -e /var/lib/gitea/.mythoclast-admin-bootstrap-complete")
+    vm.succeed("curl --fail --user project-user:project-user-recovered http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == false'")
+    vm.succeed("curl --fail --user project-user:project-user-recovered http://127.0.0.1:3000/api/v1/orgs/project-org | jq -e '.username == \"project-org\"'")
     vm.succeed("test \"$(stat -c %U /var/lib/gitea)\" = gitea")
   '';
 }

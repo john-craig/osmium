@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-08-31
+goal: Provide idempotent, safe, and testable declarative Gitea identity provisioning

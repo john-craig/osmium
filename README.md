@@ -75,6 +75,30 @@ The periodic check also rotates credentials after `maxAge` and retries failed
 rotations. A failed rotation leaves the current credential usable and does not
 record success; disabling rotation does not revert a completed rotation.
 
+Declarative non-admin users and organizations can be provisioned with runtime
+password files:
+
+```nix
+services.mythoclast.gitea.users.project-user = {
+  username = "project-user";
+  email = "project-user@example.com";
+  passwordFile = config.sops.secrets.gitea-project-user-password.path;
+};
+
+services.mythoclast.gitea.organizations.project = {
+  name = "project-org";
+  owner = "project-user";
+  description = "Declarative project organization";
+  visibility = "private";
+};
+```
+
+Users are created without administrator privileges and organizations are
+created after their declared owner exists. Reconciliation is idempotent and
+updates declared metadata, while removing a declaration does not delete or
+transfer an existing Gitea record. Changing a user's secret-file value rotates
+that user's password during reconciliation.
+
 ## Development
 
 Enter the development shell with `direnv`, or run:
