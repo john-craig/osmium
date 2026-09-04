@@ -137,6 +137,22 @@
             module = self.nixosModules.default;
           };
 
+          filesystem-snapshot-module = import ./tests/filesystem-snapshot-module.nix {
+            inherit pkgs;
+            lib = nixpkgs.lib;
+            module = self.nixosModules.default;
+          };
+
+          filesystem-snapshot-persistence = import ./tests/filesystem-snapshot-persistence.nix {
+            inherit pkgs microvm;
+            module = self.nixosModules.default;
+          };
+
+          filesystem-snapshot-drift = import ./tests/filesystem-snapshot-drift.nix {
+            inherit pkgs microvm;
+            module = self.nixosModules.default;
+          };
+
           gitea = import ./tests/gitea.nix {
             inherit pkgs microvm;
             lib = nixpkgs.lib;

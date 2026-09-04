@@ -170,6 +170,120 @@ healthchecks.http {
 The test uses a tmpfs root and a separate persistent ext4 volume. It writes
 state, reboots the guest, and verifies that the state remains available.
 
+## Filesystem Snapshots And Reverse Configuration
+
+The filesystem tracker is disabled by default and requires Btrfs source and
+snapshot subvolumes. Both the source and all tracker state must be persistent:
+
+```nix
+services.mythoclast.filesystemSnapshot = {
+  enable = true;
+  trackers.data = {
+    source = "/persistent/data";
+    snapshotRoot = "/persistent/snapshots";
+    stateDirectory = "/persistent/snapshots/.mythoclast";
+    reportDirectory = "/persistent/reports";
+    cacheDirectory = "/persistent/cache";
+    schedule = "hourly";
+    reportSchedule = "hourly";
+    retentionSchedule = "daily";
+    retention = { count = 10; age = 30 * 24 * 60 * 60; };
+    contentThreshold = 1024 * 1024;
+    exclusions = [ "cache" "tmp" ];
+    redactions = [ "secrets" ];
+    administrative = { user = "root"; group = "root"; mode = "0640"; };
+  };
+};
+```
+
+`source`, `snapshotRoot`, `stateDirectory`, `reportDirectory`, and
+`cacheDirectory` must be absolute, non-escaping persistent paths and source
+and snapshotRoot must differ. Exclusions and redactions are relative patterns.
+The administrative user, group, and octal mode control report artifacts. The
+content threshold limits emitted payloads, not hashing: changed files are
+always read and hashed completely.
+
+The baseline service creates one read-only Btrfs snapshot. Observation services
+create further read-only snapshots; scheduled observations are driven by
+`schedule`, and reports by `reportSchedule`. Retention, driven by
+`retentionSchedule`, removes only completed, eligible snapshots and protects
+the current baseline and active references. Promotion is never implicit:
+
+```sh
+systemctl start mythoclast-filesystem-snapshot-data-observe.service
+systemctl start mythoclast-filesystem-snapshot-data-report.service
+systemctl start mythoclast-filesystem-snapshot-data-promote.service
+```
+
+Set `promotionSnapshot` to the reviewed observation ID before using the
+promotion unit. The baseline, observation, report, and retention units are
+separate, serialized operations. A failed operation leaves the existing
+baseline and last complete report in place; inspect systemd logs, correct the
+source or storage problem, and rerun the specific unit. Interrupted snapshots
+and comparisons are not recorded as complete.
+
+The command interface is also available through the installed
+`mythoclast-filesystem-snapshot` wrapper: `baseline`, `observe`, `report`,
+`promote`, and `retain` operate on configured tracker paths; `validate` and
+`status` consume a named JSON schema; `export` consumes a drift report; and
+`deploy` consumes a bundle on stdin and requires `--destination`. Lifecycle
+options include `--source`, `--snapshot-root`, `--state-dir`, `--snapshot-id`,
+`--count`, `--age`, `--threshold`, `--exclude`, `--redact`, `--cache-dir`,
+`--report-json`, `--report-text`, `--mode`, `--uid`, and `--gid`. Export accepts
+`--bundle-output` and `--payload-dir`; deploy accepts `--destination` and
+`--payload-dir`.
+
+Reports and commands use stable statuses: `0` clean, `10` drift detected,
+`20` incomplete export, `30` validation error, and `40` operational error.
+Reports are deterministic and payload-free in human-readable form. Hash caching
+is used only for validated immutable snapshots; large trees should be scheduled
+appropriately because traversal and complete hashing remain the correctness
+boundary.
+
+### Bundle Review And Deployment
+
+Export is a review artifact generator, not an adoption operation. It writes
+only stdout or the explicitly selected bundle/payload paths and does not mutate
+the source tree, snapshots, baseline selection, Nix files, running system, or
+version-control state. Review the manifest, operation ordering, hashes,
+metadata, removals, and `incomplete` list. Exclusions remove paths from the
+comparison; redactions retain classifications and hashes but never expose
+payload bytes.
+
+Oversized, redacted, unsupported, and ambiguous changes remain incomplete.
+Complete them explicitly by supplying the omitted content or metadata, then
+regenerate or edit the reviewed bundle and run schema validation plus deployment
+preflight. Never treat an incomplete list as an implied deletion or as proof of
+reproducibility. Validation checks schema/version, contained relative paths,
+payload hashes, supported types, completeness, ordering, and destination
+baseline preconditions before mutation.
+
+Select an external, already-reviewed bundle only at deployment time:
+
+```nix
+services.mythoclast.filesystemSnapshot.trackers.data = {
+  bundlePath = "/run/mythoclast/reviewed-bundle.json";
+  bundlePayloadDirectory = "/run/mythoclast/payloads";
+  deploymentDestination = "/persistent/data";
+};
+```
+
+`bundlePath` is a runtime string path, so generated bundle contents are not
+embedded in evaluated Nix configuration. A null `bundlePath` creates no deploy
+unit and has no effect. A selected path enables the dedicated
+`mythoclast-filesystem-snapshot-data-deploy.service`, which reads the bundle at
+runtime, validates it, and applies it beneath `deploymentDestination`.
+
+Deployment is explicit and distinct from export. The default deployer is
+non-atomic for a live destination: a failure after preflight can leave earlier
+operations applied, so stop on the first error and compare the resulting
+canonical manifest before retrying. Applications writing concurrently can also
+invalidate preconditions. For rollback, stop and disable the deploy unit,
+restore the previously reviewed bundle or restore the destination from a
+known-good snapshot/backup, and only then rerun deployment. Disabling the
+tracker leaves source data, retained snapshots, reports, and exported bundles
+untouched.
+
 ## Next steps
 
 1. Extract common service metadata and MicroVM construction into `lib/`.
