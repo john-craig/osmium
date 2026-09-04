@@ -103,6 +103,11 @@ pkgs.testers.runNixOSTest {
         description = "Declarative project organization";
         visibility = "private";
       };
+      driftDetection = {
+        enable = true;
+        reportFile = "/var/lib/gitea/drift-report.json";
+        persistHistory = true;
+      };
       admin = {
         enable = true;
         username = "bootstrap-admin";
@@ -154,9 +159,25 @@ pkgs.testers.runNixOSTest {
     vm.succeed("curl --fail --user project-user:project-user-recovered http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == false'")
     vm.succeed("runuser -u gitea -- gitea --config /var/lib/gitea/custom/conf/app.ini admin user create --username unmanaged-user --password unmanaged-password --email unmanaged@example.com --must-change-password=false")
     vm.succeed("curl --fail --user bootstrap-admin:test-admin-password -X POST http://127.0.0.1:3000/api/v1/admin/users/bootstrap-admin/orgs -H 'Content-Type: application/json' -d '{\"username\":\"unmanaged-org\",\"description\":\"Unmanaged organization\",\"visibility\":\"private\"}'")
+    vm.succeed("runuser -u gitea -- sh -c 'for i in $(seq -w 1 50); do gitea --config /var/lib/gitea/custom/conf/app.ini admin user create --username page-user-$i --password page-password --email page-$i@example.com --must-change-password=false >/dev/null; done'", timeout=60)
     vm.succeed("systemctl reset-failed mythoclast-gitea-identities.service && systemctl start mythoclast-gitea-identities.service")
     vm.succeed("curl --fail --user unmanaged-user:unmanaged-password http://127.0.0.1:3000/api/v1/user | jq -e '.login == \"unmanaged-user\" and .is_admin == false'")
     vm.succeed("curl --fail --user bootstrap-admin:test-admin-password http://127.0.0.1:3000/api/v1/orgs/unmanaged-org | jq -e '.username == \"unmanaged-org\"'")
+    vm.succeed("runuser -u gitea -- mythoclast-gitea-drift --json > /tmp/unmanaged-drift-report.json")
+    vm.succeed("jq -e '.status == \"drift\" and any(.classifications[]; .kind == \"unmanaged\" and .username == \"unmanaged-user\") and any(.classifications[]; .kind == \"unmanaged\" and .name == \"unmanaged-org\") and any(.users[]; .username == \"page-user-50\")' /tmp/unmanaged-drift-report.json")
+    vm.succeed("curl --fail --user bootstrap-admin:test-admin-password -X PATCH http://127.0.0.1:3000/api/v1/admin/users/project-user -H 'Content-Type: application/json' -d '{\"login_name\":\"project-user\",\"email\":\"changed@example.com\",\"admin\":false,\"must_change_password\":false}'")
+    vm.succeed("set +e; runuser -u gitea -- mythoclast-gitea-drift --json --check > /tmp/changed-drift-report.json; status=$?; set -e; test $status -eq 1")
+    vm.succeed("jq -e 'any(.classifications[]; .kind == \"changed\" and .resource == \"user\" and .username == \"project-user\" and any(.differences[]; .field == \"email\"))' /tmp/changed-drift-report.json")
+    vm.succeed("grep -F 'unmanaged-user' /tmp/changed-drift-report.json")
+    vm.succeed("! grep -E -i 'password|password_hash|token|private_key' /tmp/changed-drift-report.json")
+    vm.succeed("test -e /var/lib/gitea/.mythoclast-drift-history && jq -e '.fingerprint and .schema_version == 1' /var/lib/gitea/.mythoclast-drift-history")
+    vm.succeed("runuser -u gitea -- mythoclast-gitea-drift --json > /tmp/repeated-drift-report.json && diff -u <(jq -S 'del(.observed_at)' /tmp/changed-drift-report.json) <(jq -S 'del(.observed_at)' /tmp/repeated-drift-report.json)")
+    vm.succeed("curl --fail --user bootstrap-admin:test-admin-password -X PATCH http://127.0.0.1:3000/api/v1/admin/users/project-user -H 'Content-Type: application/json' -d '{\"login_name\":\"project-user\",\"email\":\"changed@example.com\",\"admin\":true,\"must_change_password\":false}'")
+    vm.succeed("runuser -u gitea -- mythoclast-gitea-drift --json > /tmp/admin-conflict-report.json")
+    vm.succeed("jq -e 'any(.classifications[]; .kind == \"administrator-conflict\" and .username == \"project-user\")' /tmp/admin-conflict-report.json")
+    vm.succeed("curl --fail --user bootstrap-admin:test-admin-password -X PATCH http://127.0.0.1:3000/api/v1/admin/users/project-user -H 'Content-Type: application/json' -d '{\"login_name\":\"project-user\",\"email\":\"changed@example.com\",\"admin\":false,\"must_change_password\":false}'")
+    vm.succeed("systemctl stop gitea.service; set +e; runuser -u gitea -- mythoclast-gitea-drift --json > /tmp/failure-report.json; status=$?; set -e; systemctl start gitea.service; test $status -eq 2")
+    vm.succeed("jq -e '.status == \"operational-error\"' /tmp/failure-report.json")
     vm.succeed("printf 'rotated-admin-password\\n' > /run/gitea-admin-rotation-password")
     vm.succeed("systemctl restart mythoclast-gitea-admin-rotation.service")
     vm.fail("curl --fail --user bootstrap-admin:test-admin-password http://127.0.0.1:3000/api/v1/user")

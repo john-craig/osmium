@@ -10,6 +10,181 @@ let
   identityReconciliationEnabled = cfg.users != { } || cfg.organizations != { };
   adminCredentialFile = cfg.admin.passwordFile;
   adminRotationPasswordFile = if cfg.admin.rotation.passwordFile == null then "/dev/null" else cfg.admin.rotation.passwordFile;
+  driftHistoryFile = "${cfg.stateDir}/.mythoclast-drift-history";
+  driftReportFile = if cfg.driftDetection.reportFile == null then "" else cfg.driftDetection.reportFile;
+  declaredDriftUsers = builtins.toJSON (lib.mapAttrsToList (_: user: {
+    username = user.username;
+    email = user.email;
+  }) cfg.users);
+  declaredDriftOrganizations = builtins.toJSON (lib.mapAttrsToList (_: organization: {
+    name = organization.name;
+    owner = organization.owner;
+    description = organization.description;
+    visibility = organization.visibility;
+  }) cfg.organizations);
+  driftScript = pkgs.writeShellScriptBin "mythoclast-gitea-drift" ''
+    set -eu
+
+    api="http://127.0.0.1:${toString cfg.httpPort}/api/v1"
+    admin_username=${lib.escapeShellArg cfg.admin.username}
+    admin_password_file=${lib.escapeShellArg adminCredentialFile}
+    output=""
+    json=false
+    check=false
+
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --json) json=true ;;
+        --check) check=true ;;
+        --output)
+          shift
+          [ "$#" -gt 0 ] || { echo "--output requires a path" >&2; exit 2; }
+          output=$1
+          ;;
+        *) echo "usage: mythoclast-gitea-drift [--check] [--json] [--output PATH]" >&2; exit 2 ;;
+      esac
+      shift
+    done
+
+    if [ ! -s "$admin_password_file" ]; then
+      echo "Gitea drift detection administrator credential file is empty or unavailable" >&2
+      exit 2
+    fi
+    admin_password=$(cat "$admin_password_file")
+    [ -n "$admin_password" ] || { echo "Gitea drift detection administrator credential is empty" >&2; exit 2; }
+    if [ -s ${lib.escapeShellArg adminRotationPasswordFile} ]; then
+      admin_password=$(cat ${lib.escapeShellArg adminRotationPasswordFile})
+    fi
+
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' EXIT
+    users_file="$tmp_dir/users.json"
+    orgs_file="$tmp_dir/orgs.json"
+    printf '[]' > "$users_file"
+    printf '[]' > "$orgs_file"
+
+    collect_pages() {
+      endpoint=$1
+      target=$2
+      page=1
+      while :; do
+        response="$(${pkgs.curl}/bin/curl --fail --silent --show-error --user "$admin_username:$admin_password" \
+          "$api/$endpoint?limit=50&page=$page")" || return 1
+        ${pkgs.jq}/bin/jq -e 'type == "array"' >/dev/null <<<"$response" || return 1
+        ${pkgs.jq}/bin/jq -s '.[0] + .[1]' "$target" <(${pkgs.jq}/bin/jq -c '.' <<<"$response") > "$target.next"
+        mv "$target.next" "$target"
+        count=$(${pkgs.jq}/bin/jq 'length' <<<"$response")
+        [ "$count" -lt 50 ] && break
+        page=$((page + 1))
+      done
+    }
+
+    if ! collect_pages "admin/users" "$users_file" || ! collect_pages "admin/orgs" "$orgs_file"; then
+      error_report=$(${pkgs.jq}/bin/jq -cn \
+        --arg error "Unable to collect a complete read-only Gitea identity snapshot" \
+        '{schema_version: 1, status: "operational-error", errors: [$error], classifications: []}')
+      if [ -n "$output" ]; then
+        install -d -m 0750 "$(dirname "$output")"
+        printf '%s\n' "$error_report" > "$output"
+      else
+        printf '%s\n' "$error_report"
+      fi
+      exit 2
+    fi
+
+    users=$(${pkgs.jq}/bin/jq -c '[.[] | {
+      username: (.login // .username // ""),
+      email: (.email // ""),
+      admin: (.is_admin // .isAdmin // false),
+      full_name: (.full_name // ""),
+      website: (.website // ""),
+      location: (.location // "")
+    }] | sort_by(.username)' "$users_file")
+    organizations=$(${pkgs.jq}/bin/jq -c '[.[] | {
+      name: (.username // .name // ""),
+      description: (.description // ""),
+      visibility: (.visibility // ""),
+      owner: (.owner.login // .owner.username // .owner // "")
+    }] | sort_by(.name)' "$orgs_file")
+    desired_users=${lib.escapeShellArg declaredDriftUsers}
+    desired_orgs=${lib.escapeShellArg declaredDriftOrganizations}
+
+    report=$(${pkgs.jq}/bin/jq -cn \
+      --argjson observed_users "$users" \
+      --argjson observed_orgs "$organizations" \
+      --argjson desired_users "$desired_users" \
+      --argjson desired_orgs "$desired_orgs" \
+      --arg observed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+      def user_fields: ["email"];
+      def org_fields: ["description", "visibility", "owner"];
+      def differences($observed; $desired; $fields):
+        [$fields[] as $field | select(($observed[$field] // "") != ($desired[$field] // "")) |
+          {field: $field, observed: ($observed[$field] // ""), declared: ($desired[$field] // "")}];
+      def user_classifications:
+        [$observed_users[] as $observed |
+          ($desired_users | map(select(.username == $observed.username)) | first) as $desired |
+          if $desired == null then
+            {kind: (if $observed.admin then "administrator-conflict" else "unmanaged" end), resource: "user", username: $observed.username, observed: $observed}
+          elif $observed.admin then
+            {kind: "administrator-conflict", resource: "user", username: $observed.username, observed: $observed}
+          else
+            (differences($observed; $desired; user_fields)) as $differences |
+            {kind: (if $differences == [] then "matching" else "changed" end), resource: "user", username: $observed.username, differences: $differences}
+          end] +
+        [$desired_users[] as $desired | select(($observed_users | map(select(.username == $desired.username))) == []) |
+          {kind: "missing", resource: "user", username: $desired.username, declared: $desired}];
+      def org_classifications:
+        [$observed_orgs[] as $observed |
+          ($desired_orgs | map(select(.name == $observed.name)) | first) as $desired |
+          if $desired == null then
+            {kind: "unmanaged", resource: "organization", name: $observed.name, observed: $observed}
+          else
+            (differences($observed; $desired; org_fields)) as $differences |
+            {kind: (if $differences == [] then "matching" elif ([$differences[].field] | index("owner")) != null then "ownership-conflict" else "changed" end), resource: "organization", name: $observed.name, differences: $differences}
+          end] +
+        [$desired_orgs[] as $desired | select(($observed_orgs | map(select(.name == $desired.name))) == []) |
+          {kind: "missing", resource: "organization", name: $desired.name, declared: $desired}];
+      (user_classifications + org_classifications) as $classifications |
+      {schema_version: 1, observed_at: $observed_at,
+       status: (if ([$classifications[] | select(.kind != "matching")] | length) == 0 then "clean" else "drift" end),
+       users: $observed_users, organizations: $observed_orgs, classifications: $classifications,
+       errors: []}' )
+
+    canonical=$(${pkgs.jq}/bin/jq -cS 'del(.observed_at)' <<<"$report")
+    fingerprint=$(printf '%s' "$canonical" | sha256sum | cut -d ' ' -f 1)
+    history=${lib.escapeShellArg driftHistoryFile}
+    if ${lib.boolToString cfg.driftDetection.persistHistory}; then
+      tmp_history=$(mktemp "''${history}.XXXXXX")
+      trap 'rm -rf "$tmp_dir" "$tmp_history"' EXIT
+      ${pkgs.jq}/bin/jq -cn \
+        --arg fingerprint "$fingerprint" \
+        --arg observed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{schema_version: 1, fingerprint: $fingerprint, observed_at: $observed_at}' > "$tmp_history"
+      chmod 0640 "$tmp_history"
+      mv "$tmp_history" "$history"
+    fi
+
+    if [ -n "$output" ]; then
+      install -d -m 0750 "$(dirname "$output")"
+      printf '%s\n' "$report" > "$output"
+    elif [ -n ${lib.escapeShellArg driftReportFile} ]; then
+      install -d -m 0750 "$(dirname ${lib.escapeShellArg driftReportFile})"
+      printf '%s\n' "$report" > ${lib.escapeShellArg driftReportFile}
+    fi
+
+    if [ "$json" = true ] || [ "$check" = false ]; then
+      printf '%s\n' "$report"
+    else
+      ${pkgs.jq}/bin/jq -r '
+        "Gitea drift report: " + .status,
+        (.classifications[] | select(.kind != "matching") |
+          "- " + .kind + " " + .resource + " " + (.username // .name))' <<<"$report"
+    fi
+
+    if [ "$check" = true ] && [ "$(${pkgs.jq}/bin/jq '[.classifications[] | select(.kind != "matching")] | length' <<<"$report")" -gt 0 ]; then
+      exit 1
+    fi
+  '';
   userReconciliation = lib.concatMapStringsSep "\n" (name:
     let
       user = cfg.users.${name};
@@ -202,6 +377,38 @@ in
       description = "Declarative Gitea organizations owned by declared users.";
     };
 
+    driftDetection = {
+      enable = lib.mkEnableOption "read-only Gitea identity drift detection";
+
+      reportFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Optional path for the latest machine-readable drift report.";
+      };
+
+      persistHistory = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Persist a sanitized fingerprint and timestamp for the latest observation.";
+      };
+
+      runAtStartup = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Run a read-only drift check after Gitea starts.";
+      };
+
+      timer = {
+        enable = lib.mkEnableOption "periodic Gitea identity drift detection";
+
+        interval = lib.mkOption {
+          type = lib.types.str;
+          default = "1h";
+          description = "Systemd calendar interval for periodic drift checks.";
+        };
+      };
+    };
+
     admin = {
       enable = lib.mkEnableOption "the initial Gitea administrator bootstrap";
 
@@ -278,6 +485,14 @@ in
         message = "Declarative Gitea users and organizations require an administrator credential file.";
       }
       {
+        assertion = !cfg.driftDetection.enable || cfg.admin.enable;
+        message = "Gitea drift detection requires administrator bootstrap to be enabled.";
+      }
+      {
+        assertion = !cfg.driftDetection.enable || adminCredentialFile != null;
+        message = "Gitea drift detection requires an administrator credential file.";
+      }
+      {
         assertion = lib.length (lib.unique (map (user: user.username) identityDefinitions)) == lib.length identityDefinitions;
         message = "Declarative Gitea user usernames must be unique.";
       }
@@ -306,6 +521,8 @@ in
       createHome = true;
     };
     users.groups.gitea.gid = 992;
+
+    environment.systemPackages = lib.mkIf cfg.driftDetection.enable [ driftScript ];
 
     services.gitea = {
       enable = true;
@@ -369,7 +586,7 @@ in
     systemd.services.mythoclast-gitea-admin-rotation = lib.mkIf cfg.admin.rotation.enable {
       description = "Rotate the Mythoclast Gitea administrator credential";
       wantedBy = [ "multi-user.target" ];
-      after = [ "gitea.service" "mythoclast-gitea-admin-bootstrap.service" ];
+      after = [ "gitea.service" "mythoclast-gitea-admin-bootstrap.service" "mythoclast-gitea-admin-rotation.service" ];
       requires = [ "gitea.service" "mythoclast-gitea-admin-bootstrap.service" ];
       serviceConfig = {
         Type = "oneshot";
@@ -480,6 +697,41 @@ in
       text = ''
         ${pkgs.systemd}/bin/systemctl restart mythoclast-gitea-identities.service || true
       '';
+    };
+
+    systemd.services.mythoclast-gitea-drift = lib.mkIf (cfg.driftDetection.enable && cfg.driftDetection.runAtStartup) {
+      description = "Inspect Gitea identities for drift";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "gitea.service" "mythoclast-gitea-admin-bootstrap.service" ];
+      requires = [ "gitea.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = "gitea";
+        Group = "gitea";
+        UMask = "0077";
+        ExecStart = "${driftScript}/bin/mythoclast-gitea-drift --json";
+      };
+    };
+
+    systemd.services.mythoclast-gitea-drift-timer = lib.mkIf (cfg.driftDetection.enable && cfg.driftDetection.timer.enable) {
+      description = "Inspect Gitea identities for scheduled drift";
+      serviceConfig = {
+        Type = "oneshot";
+        User = "gitea";
+        Group = "gitea";
+        UMask = "0077";
+        ExecStart = "${driftScript}/bin/mythoclast-gitea-drift --json";
+      };
+    };
+
+    systemd.timers.mythoclast-gitea-drift = lib.mkIf (cfg.driftDetection.enable && cfg.driftDetection.timer.enable) {
+      description = "Schedule Gitea identity drift inspection";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = cfg.driftDetection.timer.interval;
+        OnUnitActiveSec = cfg.driftDetection.timer.interval;
+        Unit = "mythoclast-gitea-drift-timer.service";
+      };
     };
 
   } // lib.optionalAttrs (options ? microvm) {
