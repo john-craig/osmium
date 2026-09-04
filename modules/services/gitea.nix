@@ -22,6 +22,141 @@ let
     description = organization.description;
     visibility = organization.visibility;
   }) cfg.organizations);
+  exportFilter = pkgs.writeText "mythoclast-gitea-export-filter.jq" ''
+    "# Generated Gitea configuration candidate; review before activation.",
+    "# Export is read-only and does not adopt records.",
+    "",
+    "users = {",
+    (.candidates[] | select(.resource == "user") |
+      ("  " + .key + " = { username = " + (.username | @json) + "; email = " + (.email | @json) + "; full_name = " + (.full_name | @json) + "; website = " + (.website | @json) + "; location = " + (.location | @json) + "; passwordFile = builtins.throw " + ("Fill in passwordFile for " + .username + " before activation" | @json) + "; };") ),
+    "};",
+    "",
+    "organizations = {",
+    (.candidates[] | select(.resource == "organization") |
+      "  " + .key + " = { name = " + (.name | @json) + "; description = " + (.description | @json) + "; visibility = " + (.visibility | @json) + "; owner = " + (.owner | @json) + "; };") ,
+    "};"
+  '';
+  exportScript = pkgs.writeShellScriptBin "mythoclast-gitea-export" ''
+    set -eu
+
+    input=
+    output=
+    json=false
+    selected_users=
+    selected_orgs=
+
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --input)
+          shift
+          [ "$#" -gt 0 ] || { echo "--input requires a path" >&2; exit 2; }
+          input=$1
+          ;;
+        --output)
+          shift
+          [ "$#" -gt 0 ] || { echo "--output requires a path" >&2; exit 2; }
+          output=$1
+          ;;
+        --user)
+          shift
+          [ "$#" -gt 0 ] || { echo "--user requires a username" >&2; exit 2; }
+          selected_users="''${selected_users}''${selected_users:+
+}$1"
+          ;;
+        --organization)
+          shift
+          [ "$#" -gt 0 ] || { echo "--organization requires a name" >&2; exit 2; }
+          selected_orgs="''${selected_orgs}''${selected_orgs:+
+}$1"
+          ;;
+        --json) json=true ;;
+        --adopt|--apply)
+          echo "Export is review-only; adoption and activation are separate operations" >&2
+          exit 2
+          ;;
+        *)
+          echo "usage: mythoclast-gitea-export --input SNAPSHOT [--json] [--output PATH] [--user USERNAME] [--organization NAME]" >&2
+          exit 2
+          ;;
+      esac
+      shift
+    done
+
+    if [ -z "$input" ] || [ ! -r "$input" ]; then
+      echo "--input must name a readable sanitized drift snapshot" >&2
+      exit 2
+    fi
+
+    selected=$(${pkgs.jq}/bin/jq -cn \
+      --arg users "$selected_users" --arg orgs "$selected_orgs" \
+      '{users: ($users | split("\n") | map(select(length > 0))), organizations: ($orgs | split("\n") | map(select(length > 0)))}')
+
+    report=$(${pkgs.jq}/bin/jq -c \
+      --argjson selected "$selected" \
+      'if ((.users | type) != "array" or (.organizations | type) != "array") then
+         error("input must contain users and organizations arrays")
+       else
+         def selected($kind; $name):
+           (($selected[$kind] | length) == 0 or (($selected[$kind] | index($name)) != null));
+         def safe_name: test("^[A-Za-z0-9._-]+$");
+         def source_is_external:
+           ((.source // .login_source // .authentication_source // "") as $source |
+            ($source != "" and ($source | ascii_downcase) != "local" and ($source | ascii_downcase) != "internal"));
+         def key($prefix; $name):
+           ($name | ascii_downcase | gsub("[^a-z0-9]+"; "_") | gsub("^_+|_+$"; "")) as $safe |
+           ($prefix + "_" + $safe);
+         def user_base:
+           {username: (.username // .login // ""), email: (.email // ""), full_name: (.full_name // ""), website: (.website // ""), location: (.location // ""), admin: (.admin // .is_admin // false), source: (.source // .login_source // .authentication_source // "")};
+         def org_base:
+           {name: (.name // .username // ""), description: (.description // ""), visibility: (.visibility // ""), owner: (.owner // "")};
+         (.users | map(select(selected("users"; (.username // .login // ""))) | user_base)) as $users |
+         (.organizations | map(select(selected("organizations"; (.name // .username // ""))) | org_base)) as $orgs |
+         ([ $users[] | select(.username != "") | key("user"; .username) ] + [ $orgs[] | select(.name != "") | key("organization"; .name) ]) as $keys |
+         ($keys | group_by(.) | map(select(length > 1) | .[0])) as $colliding_keys |
+         ([
+           $users[] |
+           if .username == "" then {kind: "excluded", resource: "user", reason_code: "missing-identity", explanation: "User has no stable username"}
+           elif (.username | safe_name) | not then {kind: "excluded", resource: "user", username: .username, reason_code: "unsafe-name", explanation: "Username is not safe for a declaration key"}
+           elif (.admin // false) then {kind: "excluded", resource: "user", username: .username, reason_code: "administrator-account", explanation: "Administrator accounts require explicit manual handling"}
+           elif source_is_external then {kind: "excluded", resource: "user", username: .username, reason_code: "external-identity-provider", explanation: "External identity-provider records are not adoptable"}
+           elif ((key("user"; .username) as $key | $colliding_keys | index($key)) != null) then {kind: "excluded", resource: "user", username: .username, reason_code: "duplicate-declaration-key", explanation: "Identity-derived declaration key collides with another record"}
+           else {kind: "candidate", resource: "user", key: key("user"; .username), username: .username, email: .email, full_name: .full_name, website: .website, location: .location, password_file_required: true}
+           end
+         ] + [
+           $orgs[] |
+           if .name == "" then {kind: "excluded", resource: "organization", reason_code: "missing-identity", explanation: "Organization has no stable name"}
+           elif (.name | safe_name) | not then {kind: "excluded", resource: "organization", name: .name, reason_code: "unsafe-name", explanation: "Organization name is not safe for a declaration key"}
+           elif ((key("organization"; .name) as $key | $colliding_keys | index($key)) != null) then {kind: "excluded", resource: "organization", name: .name, reason_code: "duplicate-declaration-key", explanation: "Identity-derived declaration key collides with another record"}
+            elif .owner == "" then {kind: "excluded", resource: "organization", name: .name, reason_code: "ambiguous-owner", explanation: "Organization owner is missing or ambiguous"}
+            else (.owner) as $owner | if ([ $users[] | select(.username == $owner) ] | length) != 1 then {kind: "excluded", resource: "organization", name: .name, owner: $owner, reason_code: "ownership-conflict", explanation: "Organization owner does not map to exactly one observed user"}
+            else {kind: "candidate", resource: "organization", key: key("organization"; .name), name: .name, description: .description, visibility: .visibility, owner: (key("user"; $owner))}
+            end
+            end
+         ]) | sort_by([.kind, .resource, (.username // .name // ""), (.reason_code // "")]) as $records |
+          {schema_version: 1, candidates: [$records[] | select(.kind == "candidate")], exclusions: [$records[] | select(.kind == "excluded")]} end' "$input") || {
+      echo "Input is not a valid sanitized drift snapshot" >&2
+      exit 2
+    }
+
+    if [ "$json" = true ]; then
+      rendered=$report
+    else
+      rendered=$(${pkgs.jq}/bin/jq -r -f ${exportFilter} <<<"$report")
+    fi
+
+    if [ -n "$output" ]; then
+      if [ ! -d "$(dirname "$output")" ]; then
+        mkdir -p "$(dirname "$output")"
+      fi
+      tmp_output=$(mktemp "''${output}.XXXXXX")
+      trap 'rm -f "$tmp_output"' EXIT
+      printf '%s\n' "$rendered" > "$tmp_output"
+      chmod 0640 "$tmp_output"
+      mv "$tmp_output" "$output"
+    else
+      printf '%s\n' "$rendered"
+    fi
+  '';
   driftScript = pkgs.writeShellScriptBin "mythoclast-gitea-drift" ''
     set -eu
 
@@ -409,6 +544,10 @@ in
       };
     };
 
+    reverseConfiguration = {
+      enable = lib.mkEnableOption "review-only Gitea configuration candidate export";
+    };
+
     admin = {
       enable = lib.mkEnableOption "the initial Gitea administrator bootstrap";
 
@@ -522,7 +661,7 @@ in
     };
     users.groups.gitea.gid = 992;
 
-    environment.systemPackages = lib.mkIf cfg.driftDetection.enable [ driftScript ];
+    environment.systemPackages = lib.mkIf (cfg.driftDetection.enable || cfg.reverseConfiguration.enable) [ driftScript exportScript ];
 
     services.gitea = {
       enable = true;

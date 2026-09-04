@@ -99,6 +99,32 @@ updates declared metadata, while removing a declaration does not delete or
 transfer an existing Gitea record. Changing a user's secret-file value rotates
 that user's password during reconciliation.
 
+### Reverse Configuration Export
+
+Enable the review-only exporter alongside drift detection:
+
+```nix
+services.mythoclast.gitea.reverseConfiguration.enable = true;
+```
+
+Generate a sanitized drift snapshot first, then export selected records without
+changing Gitea or the repository:
+
+```sh
+mythoclast-gitea-drift --json --output /tmp/gitea-drift.json
+mythoclast-gitea-export --input /tmp/gitea-drift.json \
+  --user project-user --organization project-org --output /tmp/gitea-candidate.nix
+```
+
+Use `--json` for machine-readable candidates and exclusions. Generated users
+contain an unresolved `passwordFile` requirement; fill in a reviewed secret-file
+reference manually, evaluate the resulting Nix configuration, review the diff,
+and activate it through the normal deployment workflow. Export never adopts
+records, edits Nix source, creates adoption markers, activates configuration, or
+commits changes. Administrator accounts, unsafe names, duplicate declaration
+keys, external identity-provider records, and ambiguous organization owners are
+reported as exclusions instead of candidates.
+
 ## Development
 
 Enter the development shell with `direnv`, or run:

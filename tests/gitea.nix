@@ -108,6 +108,7 @@ pkgs.testers.runNixOSTest {
         reportFile = "/var/lib/gitea/drift-report.json";
         persistHistory = true;
       };
+      reverseConfiguration.enable = true;
       admin = {
         enable = true;
         username = "bootstrap-admin";
@@ -165,6 +166,21 @@ pkgs.testers.runNixOSTest {
     vm.succeed("curl --fail --user bootstrap-admin:test-admin-password http://127.0.0.1:3000/api/v1/orgs/unmanaged-org | jq -e '.username == \"unmanaged-org\"'")
     vm.succeed("runuser -u gitea -- mythoclast-gitea-drift --json > /tmp/unmanaged-drift-report.json")
     vm.succeed("jq -e '.status == \"drift\" and any(.classifications[]; .kind == \"unmanaged\" and .username == \"unmanaged-user\") and any(.classifications[]; .kind == \"unmanaged\" and .name == \"unmanaged-org\") and any(.users[]; .username == \"page-user-50\")' /tmp/unmanaged-drift-report.json")
+    vm.succeed("curl --fail --user bootstrap-admin:test-admin-password -X POST http://127.0.0.1:3000/api/v1/admin/users/unmanaged-user/orgs -H 'Content-Type: application/json' -d '{\"username\":\"exported-org\",\"description\":\"Exported organization\",\"visibility\":\"private\"}'")
+    vm.succeed("runuser -u gitea -- mythoclast-gitea-drift --json > /tmp/export-drift-report.json")
+    vm.succeed("jq '(.organizations[] | select(.name == \"exported-org\")).owner = \"unmanaged-user\"' /tmp/export-drift-report.json > /tmp/export-input.json")
+    vm.succeed("runuser -u gitea -- mythoclast-gitea-export --input /tmp/export-input.json --user unmanaged-user --organization exported-org --json > /tmp/export.json")
+    vm.succeed("jq -e 'any(.candidates[]; .resource == \"user\" and .key == \"user_unmanaged_user\" and .username == \"unmanaged-user\" and .password_file_required == true) and any(.candidates[]; .resource == \"organization\" and .key == \"organization_exported_org\" and .owner == \"user_unmanaged_user\")' /tmp/export.json")
+    vm.succeed("! grep -E -i 'unmanaged-password|password_hash|token|private_key|/run/' /tmp/export.json")
+    vm.succeed("runuser -u gitea -- mythoclast-gitea-export --input /tmp/export-input.json --user unmanaged-user --organization exported-org --output /tmp/export.nix && runuser -u gitea -- mythoclast-gitea-export --input /tmp/export-input.json --user unmanaged-user --organization exported-org --output /tmp/export-repeat.nix && cmp /tmp/export.nix /tmp/export-repeat.nix")
+    vm.succeed("grep -F 'builtins.throw' /tmp/export.nix")
+    vm.succeed("runuser -u gitea -- mythoclast-gitea-export --input /tmp/export-input.json --user bootstrap-admin --json > /tmp/admin-export.json && jq -e 'any(.exclusions[]; .reason_code == \"administrator-account\" and .username == \"bootstrap-admin\") and (.candidates | length) == 0' /tmp/admin-export.json")
+    vm.succeed("jq '.users += [{\"username\":\"unsafe/name\",\"email\":\"unsafe@example.com\"}] | .organizations += [{\"name\":\"ambiguous-org\",\"owner\":\"missing-owner\"}]' /tmp/export-input.json > /tmp/unsafe-export-input.json")
+    vm.succeed("runuser -u gitea -- mythoclast-gitea-export --input /tmp/unsafe-export-input.json --json > /tmp/unsafe-export.json && jq -e 'any(.exclusions[]; .reason_code == \"unsafe-name\" and .username == \"unsafe/name\") and any(.exclusions[]; .reason_code == \"ownership-conflict\" and .name == \"ambiguous-org\")' /tmp/unsafe-export.json")
+    vm.fail("runuser -u gitea -- mythoclast-gitea-export --input /tmp/export-input.json --adopt")
+    vm.succeed("! test -e /var/lib/gitea/.mythoclast-adoption")
+    vm.succeed("curl --fail --user unmanaged-user:unmanaged-password http://127.0.0.1:3000/api/v1/user | jq -e '.login == \"unmanaged-user\"'")
+    vm.succeed("curl --fail --user unmanaged-user:unmanaged-password http://127.0.0.1:3000/api/v1/orgs/exported-org | jq -e '.username == \"exported-org\" and .description == \"Exported organization\"'")
     vm.succeed("curl --fail --user bootstrap-admin:test-admin-password -X PATCH http://127.0.0.1:3000/api/v1/admin/users/project-user -H 'Content-Type: application/json' -d '{\"login_name\":\"project-user\",\"email\":\"changed@example.com\",\"admin\":false,\"must_change_password\":false}'")
     vm.succeed("set +e; runuser -u gitea -- mythoclast-gitea-drift --json --check > /tmp/changed-drift-report.json; status=$?; set -e; test $status -eq 1")
     vm.succeed("jq -e 'any(.classifications[]; .kind == \"changed\" and .resource == \"user\" and .username == \"project-user\" and any(.differences[]; .field == \"email\"))' /tmp/changed-drift-report.json")
