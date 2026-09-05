@@ -27,10 +27,10 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 SCHEMAS = {
-    "canonical-tree": "mythoclast.filesystem.canonical-tree",
-    "drift-report": "mythoclast.filesystem.drift-report",
-    "snapshot-metadata": "mythoclast.filesystem.snapshot-metadata",
-    "reconstruction-bundle": "mythoclast.filesystem.reconstruction-bundle",
+    "canonical-tree": "osmium.filesystem.canonical-tree",
+    "drift-report": "osmium.filesystem.drift-report",
+    "snapshot-metadata": "osmium.filesystem.snapshot-metadata",
+    "reconstruction-bundle": "osmium.filesystem.reconstruction-bundle",
 }
 
 EXIT_STATUS = {
@@ -187,7 +187,7 @@ class SnapshotManager:
     def __init__(self, source: str | bytes, snapshot_root: str | bytes, state_dir: str | bytes | None = None, runner: Any = None):
         self.source = Path(os.fsdecode(os_path_bytes(source)))
         self.root = Path(os.fsdecode(os_path_bytes(snapshot_root)))
-        self.state = Path(os.fsdecode(os_path_bytes(state_dir))) if state_dir is not None else self.root / ".mythoclast"
+        self.state = Path(os.fsdecode(os_path_bytes(state_dir))) if state_dir is not None else self.root / ".osmium"
         self.runner = runner or self._subprocess_runner
 
     @staticmethod

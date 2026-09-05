@@ -1,16 +1,17 @@
 { config, lib, options, pkgs, ... }:
 
 let
-  cfg = config.services.mythoclast.gitea;
+  cfg = config.services.osmium.gitea;
   serverSettings = cfg.settings.server or { };
   databaseSettings = cfg.settings.database or { };
-  adminBootstrapMarker = "${cfg.stateDir}/.mythoclast-admin-bootstrap-complete";
-  adminRotationState = "${cfg.stateDir}/.mythoclast-admin-rotation";
+  adminBootstrapMarker = "${cfg.stateDir}/.osmium-admin-bootstrap-complete";
+  legacyAdminBootstrapMarker = "${cfg.stateDir}/.mythoclast-admin-bootstrap-complete";
+  adminRotationState = "${cfg.stateDir}/.osmium-admin-rotation";
   identityDefinitions = lib.attrValues cfg.users;
   identityReconciliationEnabled = cfg.users != { } || cfg.organizations != { };
   adminCredentialFile = cfg.admin.passwordFile;
   adminRotationPasswordFile = if cfg.admin.rotation.passwordFile == null then "/dev/null" else cfg.admin.rotation.passwordFile;
-  driftHistoryFile = "${cfg.stateDir}/.mythoclast-drift-history";
+  driftHistoryFile = "${cfg.stateDir}/.osmium-drift-history";
   driftReportFile = if cfg.driftDetection.reportFile == null then "" else cfg.driftDetection.reportFile;
   declaredDriftUsers = builtins.toJSON (lib.mapAttrsToList (_: user: {
     username = user.username;
@@ -22,7 +23,7 @@ let
     description = organization.description;
     visibility = organization.visibility;
   }) cfg.organizations);
-  exportFilter = pkgs.writeText "mythoclast-gitea-export-filter.jq" ''
+  exportFilter = pkgs.writeText "osmium-gitea-export-filter.jq" ''
     "# Generated Gitea configuration candidate; review before activation.",
     "# Export is read-only and does not adopt records.",
     "",
@@ -36,7 +37,7 @@ let
       "  " + .key + " = { name = " + (.name | @json) + "; description = " + (.description | @json) + "; visibility = " + (.visibility | @json) + "; owner = " + (.owner | @json) + "; };") ,
     "};"
   '';
-  exportScript = pkgs.writeShellScriptBin "mythoclast-gitea-export" ''
+  exportScript = pkgs.writeShellScriptBin "osmium-gitea-export" ''
     set -eu
 
     input=
@@ -75,7 +76,7 @@ let
           exit 2
           ;;
         *)
-          echo "usage: mythoclast-gitea-export --input SNAPSHOT [--json] [--output PATH] [--user USERNAME] [--organization NAME]" >&2
+          echo "usage: osmium-gitea-export --input SNAPSHOT [--json] [--output PATH] [--user USERNAME] [--organization NAME]" >&2
           exit 2
           ;;
       esac
@@ -157,7 +158,7 @@ let
       printf '%s\n' "$rendered"
     fi
   '';
-  driftScript = pkgs.writeShellScriptBin "mythoclast-gitea-drift" ''
+  driftScript = pkgs.writeShellScriptBin "osmium-gitea-drift" ''
     set -eu
 
     api="http://127.0.0.1:${toString cfg.httpPort}/api/v1"
@@ -176,7 +177,7 @@ let
           [ "$#" -gt 0 ] || { echo "--output requires a path" >&2; exit 2; }
           output=$1
           ;;
-        *) echo "usage: mythoclast-gitea-drift [--check] [--json] [--output PATH]" >&2; exit 2 ;;
+        *) echo "usage: osmium-gitea-drift [--check] [--json] [--output PATH]" >&2; exit 2 ;;
       esac
       shift
     done
@@ -323,7 +324,7 @@ let
   userReconciliation = lib.concatMapStringsSep "\n" (name:
     let
       user = cfg.users.${name};
-      state = "${cfg.stateDir}/.mythoclast-user-${name}";
+      state = "${cfg.stateDir}/.osmium-user-${name}";
     in
     ''
       user_password=$(cat ${lib.escapeShellArg user.passwordFile})
@@ -419,8 +420,8 @@ let
     '') (lib.attrNames cfg.organizations);
 in
 {
-  options.services.mythoclast.gitea = {
-    enable = lib.mkEnableOption "the Mythoclast Gitea service";
+  options.services.osmium.gitea = {
+    enable = lib.mkEnableOption "the Osmium Gitea service";
 
     stateDir = lib.mkOption {
       type = lib.types.str;
@@ -597,7 +598,7 @@ in
     assertions = [
       {
         assertion = lib.hasPrefix "/var/lib/" cfg.stateDir;
-        message = "services.mythoclast.gitea.stateDir must be below /var/lib.";
+        message = "services.osmium.gitea.stateDir must be below /var/lib.";
       }
       {
         assertion = cfg.hostHttpPort != cfg.hostSshPort;
@@ -605,7 +606,7 @@ in
       }
       {
         assertion = !cfg.admin.enable || cfg.admin.passwordFile != null;
-        message = "services.mythoclast.gitea.admin.passwordFile is required when administrator bootstrap is enabled.";
+        message = "services.osmium.gitea.admin.passwordFile is required when administrator bootstrap is enabled.";
       }
       {
         assertion = !cfg.admin.rotation.enable || cfg.admin.enable;
@@ -613,7 +614,7 @@ in
       }
       {
         assertion = !cfg.admin.rotation.enable || cfg.admin.rotation.passwordFile != null;
-        message = "services.mythoclast.gitea.admin.rotation.passwordFile is required when credential rotation is enabled.";
+        message = "services.osmium.gitea.admin.rotation.passwordFile is required when credential rotation is enabled.";
       }
       {
         assertion = !identityReconciliationEnabled || cfg.admin.enable;
@@ -696,8 +697,8 @@ in
       }
     ];
 
-    systemd.services.mythoclast-gitea-admin-bootstrap = lib.mkIf cfg.admin.enable {
-      description = "Bootstrap the Mythoclast Gitea administrator";
+    systemd.services.osmium-gitea-admin-bootstrap = lib.mkIf cfg.admin.enable {
+      description = "Bootstrap the Osmium Gitea administrator";
       wantedBy = [ "multi-user.target" ];
       after = [ "gitea.service" ];
       requires = [ "gitea.service" ];
@@ -708,8 +709,12 @@ in
         User = "gitea";
         Group = "gitea";
         UMask = "0077";
-        ExecStart = pkgs.writeShellScript "mythoclast-gitea-admin-bootstrap" ''
+        ExecStart = pkgs.writeShellScript "osmium-gitea-admin-bootstrap" ''
           set -eu
+          if [ -e ${lib.escapeShellArg legacyAdminBootstrapMarker} ]; then
+            install -m 0640 /dev/null ${lib.escapeShellArg adminBootstrapMarker}
+            exit 0
+          fi
           password=$(cat ${lib.escapeShellArg cfg.admin.passwordFile})
           ${pkgs.gitea}/bin/gitea --config ${lib.escapeShellArg "${cfg.stateDir}/custom/conf/app.ini"} admin user create \
             --username ${lib.escapeShellArg cfg.admin.username} \
@@ -722,17 +727,17 @@ in
       };
     };
 
-    systemd.services.mythoclast-gitea-admin-rotation = lib.mkIf cfg.admin.rotation.enable {
-      description = "Rotate the Mythoclast Gitea administrator credential";
+    systemd.services.osmium-gitea-admin-rotation = lib.mkIf cfg.admin.rotation.enable {
+      description = "Rotate the Osmium Gitea administrator credential";
       wantedBy = [ "multi-user.target" ];
-      after = [ "gitea.service" "mythoclast-gitea-admin-bootstrap.service" "mythoclast-gitea-admin-rotation.service" ];
-      requires = [ "gitea.service" "mythoclast-gitea-admin-bootstrap.service" ];
+      after = [ "gitea.service" "osmium-gitea-admin-bootstrap.service" "osmium-gitea-admin-rotation.service" ];
+      requires = [ "gitea.service" "osmium-gitea-admin-bootstrap.service" ];
       serviceConfig = {
         Type = "oneshot";
         User = "gitea";
         Group = "gitea";
         UMask = "0077";
-        ExecStart = pkgs.writeShellScript "mythoclast-gitea-admin-rotation" ''
+        ExecStart = pkgs.writeShellScript "osmium-gitea-admin-rotation" ''
           set -eu
           state=${lib.escapeShellArg adminRotationState}
           password_file=${lib.escapeShellArg cfg.admin.rotation.passwordFile}
@@ -783,33 +788,33 @@ in
       };
     };
 
-    systemd.timers.mythoclast-gitea-admin-rotation = lib.mkIf cfg.admin.rotation.enable {
-      description = "Check the Mythoclast Gitea administrator credential age";
+    systemd.timers.osmium-gitea-admin-rotation = lib.mkIf cfg.admin.rotation.enable {
+      description = "Check the Osmium Gitea administrator credential age";
       wantedBy = [ "timers.target" ];
       timerConfig = {
         OnBootSec = "${toString cfg.admin.rotation.checkInterval}s";
         OnUnitActiveSec = "${toString cfg.admin.rotation.checkInterval}s";
-        Unit = "mythoclast-gitea-admin-rotation.service";
+        Unit = "osmium-gitea-admin-rotation.service";
       };
     };
 
-    system.activationScripts.mythoclast-gitea-admin-rotation = lib.mkIf cfg.admin.rotation.enable {
+    system.activationScripts.osmium-gitea-admin-rotation = lib.mkIf cfg.admin.rotation.enable {
       text = ''
-        ${pkgs.systemd}/bin/systemctl restart mythoclast-gitea-admin-rotation.service || true
+        ${pkgs.systemd}/bin/systemctl restart osmium-gitea-admin-rotation.service || true
       '';
     };
 
-    systemd.services.mythoclast-gitea-identities = lib.mkIf identityReconciliationEnabled {
-      description = "Reconcile declarative Mythoclast Gitea users and organizations";
+    systemd.services.osmium-gitea-identities = lib.mkIf identityReconciliationEnabled {
+      description = "Reconcile declarative Osmium Gitea users and organizations";
       wantedBy = [ "multi-user.target" ];
-      after = [ "gitea.service" "mythoclast-gitea-admin-bootstrap.service" "mythoclast-gitea-admin-rotation.service" ];
-      requires = [ "gitea.service" "mythoclast-gitea-admin-bootstrap.service" ];
+      after = [ "gitea.service" "osmium-gitea-admin-bootstrap.service" "osmium-gitea-admin-rotation.service" ];
+      requires = [ "gitea.service" "osmium-gitea-admin-bootstrap.service" ];
       serviceConfig = {
         Type = "oneshot";
         User = "gitea";
         Group = "gitea";
         UMask = "0077";
-        ExecStart = pkgs.writeShellScript "mythoclast-gitea-identities" ''
+        ExecStart = pkgs.writeShellScript "osmium-gitea-identities" ''
           set -eu
           admin_username=${lib.escapeShellArg cfg.admin.username}
           admin_password=$(cat ${lib.escapeShellArg adminCredentialFile})
@@ -832,44 +837,44 @@ in
       };
     };
 
-    system.activationScripts.mythoclast-gitea-identities = lib.mkIf identityReconciliationEnabled {
+    system.activationScripts.osmium-gitea-identities = lib.mkIf identityReconciliationEnabled {
       text = ''
-        ${pkgs.systemd}/bin/systemctl restart mythoclast-gitea-identities.service || true
+        ${pkgs.systemd}/bin/systemctl restart osmium-gitea-identities.service || true
       '';
     };
 
-    systemd.services.mythoclast-gitea-drift = lib.mkIf (cfg.driftDetection.enable && cfg.driftDetection.runAtStartup) {
+    systemd.services.osmium-gitea-drift = lib.mkIf (cfg.driftDetection.enable && cfg.driftDetection.runAtStartup) {
       description = "Inspect Gitea identities for drift";
       wantedBy = [ "multi-user.target" ];
-      after = [ "gitea.service" "mythoclast-gitea-admin-bootstrap.service" ];
+      after = [ "gitea.service" "osmium-gitea-admin-bootstrap.service" ];
       requires = [ "gitea.service" ];
       serviceConfig = {
         Type = "oneshot";
         User = "gitea";
         Group = "gitea";
         UMask = "0077";
-        ExecStart = "${driftScript}/bin/mythoclast-gitea-drift --json";
+        ExecStart = "${driftScript}/bin/osmium-gitea-drift --json";
       };
     };
 
-    systemd.services.mythoclast-gitea-drift-timer = lib.mkIf (cfg.driftDetection.enable && cfg.driftDetection.timer.enable) {
+    systemd.services.osmium-gitea-drift-timer = lib.mkIf (cfg.driftDetection.enable && cfg.driftDetection.timer.enable) {
       description = "Inspect Gitea identities for scheduled drift";
       serviceConfig = {
         Type = "oneshot";
         User = "gitea";
         Group = "gitea";
         UMask = "0077";
-        ExecStart = "${driftScript}/bin/mythoclast-gitea-drift --json";
+        ExecStart = "${driftScript}/bin/osmium-gitea-drift --json";
       };
     };
 
-    systemd.timers.mythoclast-gitea-drift = lib.mkIf (cfg.driftDetection.enable && cfg.driftDetection.timer.enable) {
+    systemd.timers.osmium-gitea-drift = lib.mkIf (cfg.driftDetection.enable && cfg.driftDetection.timer.enable) {
       description = "Schedule Gitea identity drift inspection";
       wantedBy = [ "timers.target" ];
       timerConfig = {
         OnBootSec = cfg.driftDetection.timer.interval;
         OnUnitActiveSec = cfg.driftDetection.timer.interval;
-        Unit = "mythoclast-gitea-drift-timer.service";
+        Unit = "osmium-gitea-drift-timer.service";
       };
     };
 

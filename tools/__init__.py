@@ -1,1 +1,1 @@
-"""Standalone Mythoclast runtime tools."""
+"""Standalone Osmium runtime tools."""

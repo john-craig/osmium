@@ -23,7 +23,7 @@
         microvm.nixosModules.microvm
         self.nixosModules.default
         {
-          networking.hostName = "mythoclast-demo";
+           networking.hostName = "osmium-demo";
           system.stateVersion = "25.05";
 
           microvm = {
@@ -37,7 +37,7 @@
             } ];
           };
 
-          services.mythoclast.hello = {
+           services.osmium.hello = {
             enable = true;
             port = 8080;
           };
@@ -48,7 +48,7 @@
         microvm.nixosModules.microvm
         self.nixosModules.default
         {
-          networking.hostName = "mythoclast-gitea";
+           networking.hostName = "osmium-gitea";
           system.stateVersion = "25.05";
 
           microvm = {
@@ -62,7 +62,7 @@
             } ];
           };
 
-          services.mythoclast.gitea = {
+           services.osmium.gitea = {
             enable = true;
             hostHttpPort = 3001;
             hostSshPort = 2223;
@@ -103,7 +103,7 @@
               fsType = "tmpfs";
             };
             boot.loader.grub.devices = [ "/dev/vda" ];
-            mythoclast.host = {
+             osmium.host = {
               enable = true;
               autostart = [ "demo" ];
             };
@@ -125,6 +125,11 @@
       checks = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          rebrand = import ./tests/rebrand.nix {
+            inherit pkgs microvm;
+            lib = nixpkgs.lib;
+            module = self.nixosModules.default;
+          };
         in
         {
           module-evaluation = (nixpkgs.lib.nixosSystem {
@@ -159,6 +164,9 @@
             module = self.nixosModules.default;
             healthchecks = import ./tests/healthchecks.nix { lib = nixpkgs.lib; };
           };
+
+          osmium-rebrand-fresh = rebrand.osmium-rebrand-fresh;
+          osmium-rebrand-migration = rebrand.osmium-rebrand-migration;
         });
 
       devShells = forAllSystems (system: {

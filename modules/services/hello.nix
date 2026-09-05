@@ -1,11 +1,11 @@
 { config, lib, pkgs, ... }:
 
 let
-  cfg = config.services.mythoclast.hello;
+  cfg = config.services.osmium.hello;
 in
 {
-  options.services.mythoclast.hello = {
-    enable = lib.mkEnableOption "the Mythoclast persistence test service";
+  options.services.osmium.hello = {
+    enable = lib.mkEnableOption "the Osmium persistence test service";
 
     port = lib.mkOption {
       type = lib.types.port;
@@ -15,7 +15,7 @@ in
 
     stateDirectory = lib.mkOption {
       type = lib.types.str;
-      default = "/var/lib/mythoclast-hello";
+      default = "/var/lib/osmium-hello";
       readOnly = true;
       description = "Directory containing service state.";
     };
@@ -25,16 +25,16 @@ in
     assertions = [
       {
         assertion = lib.hasPrefix "/var/lib/" cfg.stateDirectory;
-        message = "services.mythoclast.hello.stateDirectory must be below /var/lib.";
+        message = "services.osmium.hello.stateDirectory must be below /var/lib.";
       }
     ];
 
-    users.users.mythoclast-hello = {
+    users.users.osmium-hello = {
       isSystemUser = true;
-      group = "mythoclast-hello";
+      group = "osmium-hello";
       uid = 991;
     };
-    users.groups.mythoclast-hello = {
+    users.groups.osmium-hello = {
       gid = 991;
     };
 
@@ -44,21 +44,21 @@ in
       directories = [
         {
           directory = cfg.stateDirectory;
-          user = "mythoclast-hello";
-          group = "mythoclast-hello";
+          user = "osmium-hello";
+          group = "osmium-hello";
           mode = "0750";
         }
       ];
     };
 
-    systemd.services.mythoclast-hello = {
-      description = "Mythoclast persistence test service";
+    systemd.services.osmium-hello = {
+      description = "Osmium persistence test service";
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
         Type = "simple";
-        User = "mythoclast-hello";
-        Group = "mythoclast-hello";
-        StateDirectory = "mythoclast-hello";
+        User = "osmium-hello";
+        Group = "osmium-hello";
+        StateDirectory = "osmium-hello";
         ExecStart = "${pkgs.python3}/bin/python -m http.server ${toString cfg.port} --directory ${cfg.stateDirectory}";
         Restart = "on-failure";
       };

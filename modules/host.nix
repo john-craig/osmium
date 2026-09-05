@@ -1,8 +1,12 @@
 { config, lib, ... }:
 
 {
-  options.mythoclast.host = {
-    enable = lib.mkEnableOption "the Mythoclast MicroVM host integration";
+  imports = [
+    (lib.mkAliasOptionModule [ "mythoclast" "host" ] [ "osmium" "host" ])
+  ];
+
+  options.osmium.host = {
+    enable = lib.mkEnableOption "the Osmium MicroVM host integration";
 
     autostart = lib.mkOption {
       type = lib.types.listOf lib.types.str;
@@ -11,7 +15,7 @@
     };
   };
 
-  config = lib.mkIf config.mythoclast.host.enable {
-    microvm.autostart = config.mythoclast.host.autostart;
+  config = lib.mkIf config.osmium.host.enable {
+    microvm.autostart = config.osmium.host.autostart;
   };
 }

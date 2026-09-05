@@ -30,3 +30,36 @@ its result. Prefer exposing it as a flake check, for example:
 ```sh
 nix build .#checks.x86_64-linux.<service> --print-build-logs
 ```
+
+## Declarative Attribute Specifications
+
+Whenever an OpenSpec change adds new declarative attributes to any service
+module, the specification must include both directions of reverse
+configuration for those attributes:
+
+- Drift detection must identify changes to the attributes and provide a
+  reviewable conversion into a Mythoclast declaration.
+- Live-system capture must read the attributes from a running service/system
+  and provide a reviewable conversion into a Mythoclast declaration.
+
+Both mechanisms must remain safe and explicit: they must define their
+secret-handling, unsupported or ambiguous state, completeness, provenance, and
+non-mutating/review-only behavior. The generated declaration must not claim to
+be complete when required state is missing or cannot be represented.
+
+The OpenSpec proposal, design, and task list must identify dedicated MicroVM
+integration tests for both drift-based conversion and live-capture conversion.
+Each test must boot and exercise the relevant service behavior in a MicroVM;
+NixOS option evaluation, system-closure builds, or unit-only tests are not
+sufficient. The tests must verify the generated declaration is produced from
+the runtime observation/capture rather than from an independently authored
+equivalent fixture, and must verify the resulting declaration behavior.
+
+Before considering such a change verified, execute both MicroVM testcases and
+report their results. Prefer exposing them as separate flake checks, for
+example:
+
+```sh
+nix build .#checks.x86_64-linux.<service>-drift-reverse-configuration --print-build-logs
+nix build .#checks.x86_64-linux.<service>-live-capture-reverse-configuration --print-build-logs
+```

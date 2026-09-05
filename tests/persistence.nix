@@ -1,7 +1,7 @@
 { pkgs, module }:
 
 pkgs.testers.runNixOSTest {
-  name = "mythoclast-persistence";
+  name = "osmium-persistence";
 
   nodes.vm = {
     imports = [ module ];
@@ -23,7 +23,7 @@ pkgs.testers.runNixOSTest {
       neededForBoot = true;
     };
 
-    services.mythoclast.hello = {
+    services.osmium.hello = {
       enable = true;
       port = 8080;
     };
@@ -31,14 +31,14 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     vm.start(allow_reboot=True)
-    vm.wait_for_unit("mythoclast-hello.service")
+    vm.wait_for_unit("osmium-hello.service")
     vm.wait_for_open_port(8080)
-    vm.succeed("test -d /var/lib/mythoclast-hello")
-    vm.succeed("echo persistent-state > /var/lib/mythoclast-hello/state")
+    vm.succeed("test -d /var/lib/osmium-hello")
+    vm.succeed("echo persistent-state > /var/lib/osmium-hello/state")
     vm.succeed("curl --fail http://127.0.0.1:8080/state")
     vm.reboot()
-    vm.wait_for_unit("mythoclast-hello.service")
+    vm.wait_for_unit("osmium-hello.service")
     vm.wait_for_open_port(8080)
-    vm.succeed("test \"$(cat /var/lib/mythoclast-hello/state)\" = persistent-state")
+    vm.succeed("test \"$(cat /var/lib/osmium-hello/state)\" = persistent-state")
   '';
 }

@@ -1,4 +1,4 @@
-# Mythoclast
+# Osmium
 
 Reproducible NixOS service definitions running in isolated MicroVMs and
 tested with impermanent guest filesystems.
@@ -25,7 +25,7 @@ The examples are exposed as `nixosConfigurations.demo-guest`,
 Enable Gitea in a guest with:
 
 ```nix
-services.mythoclast.gitea = {
+services.osmium.gitea = {
   enable = true;
   hostHttpPort = 3001;
   hostSshPort = 2223;
@@ -48,7 +48,7 @@ sops.secrets.gitea-admin-password = {
   mode = "0400";
 };
 
-services.mythoclast.gitea.admin = {
+services.osmium.gitea.admin = {
   enable = true;
   username = "admin";
   passwordFile = config.sops.secrets.gitea-admin-password.path;
@@ -62,7 +62,7 @@ on later starts.
 Administrator credential rotation can be enabled with a replacement secret:
 
 ```nix
-services.mythoclast.gitea.admin.rotation = {
+services.osmium.gitea.admin.rotation = {
   enable = true;
   passwordFile = config.sops.secrets.gitea-admin-rotation-password.path;
   maxAge = 90 * 24 * 60 * 60;
@@ -79,13 +79,13 @@ Declarative non-admin users and organizations can be provisioned with runtime
 password files:
 
 ```nix
-services.mythoclast.gitea.users.project-user = {
+services.osmium.gitea.users.project-user = {
   username = "project-user";
   email = "project-user@example.com";
   passwordFile = config.sops.secrets.gitea-project-user-password.path;
 };
 
-services.mythoclast.gitea.organizations.project = {
+services.osmium.gitea.organizations.project = {
   name = "project-org";
   owner = "project-user";
   description = "Declarative project organization";
@@ -104,15 +104,15 @@ that user's password during reconciliation.
 Enable the review-only exporter alongside drift detection:
 
 ```nix
-services.mythoclast.gitea.reverseConfiguration.enable = true;
+services.osmium.gitea.reverseConfiguration.enable = true;
 ```
 
 Generate a sanitized drift snapshot first, then export selected records without
 changing Gitea or the repository:
 
 ```sh
-mythoclast-gitea-drift --json --output /tmp/gitea-drift.json
-mythoclast-gitea-export --input /tmp/gitea-drift.json \
+osmium-gitea-drift --json --output /tmp/gitea-drift.json
+osmium-gitea-export --input /tmp/gitea-drift.json \
   --user project-user --organization project-org --output /tmp/gitea-candidate.nix
 ```
 
@@ -176,12 +176,12 @@ The filesystem tracker is disabled by default and requires Btrfs source and
 snapshot subvolumes. Both the source and all tracker state must be persistent:
 
 ```nix
-services.mythoclast.filesystemSnapshot = {
+services.osmium.filesystemSnapshot = {
   enable = true;
   trackers.data = {
     source = "/persistent/data";
     snapshotRoot = "/persistent/snapshots";
-    stateDirectory = "/persistent/snapshots/.mythoclast";
+    stateDirectory = "/persistent/snapshots/.osmium";
     reportDirectory = "/persistent/reports";
     cacheDirectory = "/persistent/cache";
     schedule = "hourly";
@@ -210,9 +210,9 @@ create further read-only snapshots; scheduled observations are driven by
 the current baseline and active references. Promotion is never implicit:
 
 ```sh
-systemctl start mythoclast-filesystem-snapshot-data-observe.service
-systemctl start mythoclast-filesystem-snapshot-data-report.service
-systemctl start mythoclast-filesystem-snapshot-data-promote.service
+systemctl start osmium-filesystem-snapshot-data-observe.service
+systemctl start osmium-filesystem-snapshot-data-report.service
+systemctl start osmium-filesystem-snapshot-data-promote.service
 ```
 
 Set `promotionSnapshot` to the reviewed observation ID before using the
@@ -223,7 +223,7 @@ source or storage problem, and rerun the specific unit. Interrupted snapshots
 and comparisons are not recorded as complete.
 
 The command interface is also available through the installed
-`mythoclast-filesystem-snapshot` wrapper: `baseline`, `observe`, `report`,
+`osmium-filesystem-snapshot` wrapper: `baseline`, `observe`, `report`,
 `promote`, and `retain` operate on configured tracker paths; `validate` and
 `status` consume a named JSON schema; `export` consumes a drift report; and
 `deploy` consumes a bundle on stdin and requires `--destination`. Lifecycle
@@ -261,9 +261,9 @@ baseline preconditions before mutation.
 Select an external, already-reviewed bundle only at deployment time:
 
 ```nix
-services.mythoclast.filesystemSnapshot.trackers.data = {
-  bundlePath = "/run/mythoclast/reviewed-bundle.json";
-  bundlePayloadDirectory = "/run/mythoclast/payloads";
+services.osmium.filesystemSnapshot.trackers.data = {
+  bundlePath = "/run/osmium/reviewed-bundle.json";
+  bundlePayloadDirectory = "/run/osmium/payloads";
   deploymentDestination = "/persistent/data";
 };
 ```
@@ -271,7 +271,7 @@ services.mythoclast.filesystemSnapshot.trackers.data = {
 `bundlePath` is a runtime string path, so generated bundle contents are not
 embedded in evaluated Nix configuration. A null `bundlePath` creates no deploy
 unit and has no effect. A selected path enables the dedicated
-`mythoclast-filesystem-snapshot-data-deploy.service`, which reads the bundle at
+`osmium-filesystem-snapshot-data-deploy.service`, which reads the bundle at
 runtime, validates it, and applies it beneath `deploymentDestination`.
 
 Deployment is explicit and distinct from export. The default deployer is

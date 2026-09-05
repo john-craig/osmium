@@ -5,7 +5,7 @@
 
   system.stateVersion = "25.05";
 
-  mythoclast.host = {
+  osmium.host = {
     enable = true;
     autostart = [ "demo" ];
   };

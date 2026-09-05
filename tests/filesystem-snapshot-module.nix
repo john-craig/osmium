@@ -19,11 +19,11 @@ let
     {
       system.stateVersion = "25.05";
       environment.persistence."/persistent" = { files = [ ]; };
-      services.mythoclast.filesystemSnapshot = {
+      services.osmium.filesystemSnapshot = {
         enable = true;
         trackers.example = {
           source = "/persistent/data";
-          snapshotRoot = "/var/lib/mythoclast-snapshots";
+          snapshotRoot = "/var/lib/osmium-snapshots";
           schedule = "hourly";
           retention = { count = 5; age = 86400; };
           contentThreshold = 4096;
@@ -43,27 +43,27 @@ let
     let result = builtins.tryEval (passes configuration); in
     !result.success || !result.value;
 in
-pkgs.runCommand "mythoclast-filesystem-snapshot-module-evaluation" { } ''
+pkgs.runCommand "osmium-filesystem-snapshot-module-evaluation" { } ''
   test ${lib.boolToString (lib.all (assertion: assertion.assertion) valid.config.assertions)} = true
-  test ${lib.boolToString (!(valid.config.systemd.services ? "mythoclast-filesystem-snapshot-example-deploy"))} = true
+  test ${lib.boolToString (!(valid.config.systemd.services ? "osmium-filesystem-snapshot-example-deploy"))} = true
   ${let selected = evaluate [ module {
     system.stateVersion = "25.05";
     environment.persistence."/persistent" = { files = [ ]; };
-    services.mythoclast.filesystemSnapshot = {
+    services.osmium.filesystemSnapshot = {
       enable = true;
       trackers.example = {
         source = "/persistent/data";
-        snapshotRoot = "/var/lib/mythoclast-snapshots";
-        bundlePath = "/run/mythoclast/reviewed-bundle.json";
+        snapshotRoot = "/var/lib/osmium-snapshots";
+        bundlePath = "/run/osmium/reviewed-bundle.json";
       };
     };
   }]; in ''
-    test ${lib.boolToString (selected.config.systemd.services ? "mythoclast-filesystem-snapshot-example-deploy")} = true
-    test "${selected.config.systemd.services."mythoclast-filesystem-snapshot-example-deploy".serviceConfig.StandardInput}" = "file:/run/mythoclast/reviewed-bundle.json"
+    test ${lib.boolToString (selected.config.systemd.services ? "osmium-filesystem-snapshot-example-deploy")} = true
+    test "${selected.config.systemd.services."osmium-filesystem-snapshot-example-deploy".serviceConfig.StandardInput}" = "file:/run/osmium/reviewed-bundle.json"
   ''}
   ${lib.optionalString (!rejects {
     system.stateVersion = "25.05";
-    services.mythoclast.filesystemSnapshot = {
+    services.osmium.filesystemSnapshot = {
       enable = true;
       trackers.example = {
         source = "/etc/data";
@@ -73,7 +73,7 @@ pkgs.runCommand "mythoclast-filesystem-snapshot-module-evaluation" { } ''
   }) ''exit 1''}
   ${lib.optionalString (!rejects {
     system.stateVersion = "25.05";
-    services.mythoclast.filesystemSnapshot = {
+    services.osmium.filesystemSnapshot = {
       enable = true;
       trackers.example = {
         source = "/var/lib/data";
@@ -83,7 +83,7 @@ pkgs.runCommand "mythoclast-filesystem-snapshot-module-evaluation" { } ''
   }) ''exit 1''}
   ${lib.optionalString (!rejects {
     system.stateVersion = "25.05";
-    services.mythoclast.filesystemSnapshot = {
+    services.osmium.filesystemSnapshot = {
       enable = true;
       trackers.example = {
         source = "/var/lib/data";

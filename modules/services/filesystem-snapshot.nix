@@ -1,7 +1,7 @@
 { config, lib, pkgs, ... }:
 
 let
-  cfg = config.services.mythoclast.filesystemSnapshot;
+  cfg = config.services.osmium.filesystemSnapshot;
 
   pathIsSafe = path:
     lib.hasPrefix "/" path
@@ -24,135 +24,135 @@ let
     (name: tracker: [
       {
         assertion = pathIsSafe tracker.source && pathIsPersistent tracker.source;
-        message = "services.mythoclast.filesystemSnapshot.trackers.${name}.source must be a safe persistent path under /var/lib or a declared persistence root.";
+        message = "services.osmium.filesystemSnapshot.trackers.${name}.source must be a safe persistent path under /var/lib or a declared persistence root.";
       }
       {
         assertion = pathIsSafe tracker.snapshotRoot && pathIsPersistent tracker.snapshotRoot;
-        message = "services.mythoclast.filesystemSnapshot.trackers.${name}.snapshotRoot must be a safe persistent path under /var/lib or a declared persistence root.";
+        message = "services.osmium.filesystemSnapshot.trackers.${name}.snapshotRoot must be a safe persistent path under /var/lib or a declared persistence root.";
       }
       {
         assertion = pathIsSafe tracker.stateDirectory && pathIsPersistent tracker.stateDirectory;
-        message = "services.mythoclast.filesystemSnapshot.trackers.${name}.stateDirectory must be a safe persistent path under /var/lib or a declared persistence root.";
+        message = "services.osmium.filesystemSnapshot.trackers.${name}.stateDirectory must be a safe persistent path under /var/lib or a declared persistence root.";
       }
       {
         assertion = pathIsSafe tracker.reportDirectory && pathIsPersistent tracker.reportDirectory;
-        message = "services.mythoclast.filesystemSnapshot.trackers.${name}.reportDirectory must be a safe persistent path under /var/lib or a declared persistence root.";
+        message = "services.osmium.filesystemSnapshot.trackers.${name}.reportDirectory must be a safe persistent path under /var/lib or a declared persistence root.";
       }
       {
         assertion = pathIsSafe tracker.cacheDirectory && pathIsPersistent tracker.cacheDirectory;
-        message = "services.mythoclast.filesystemSnapshot.trackers.${name}.cacheDirectory must be a safe persistent path under /var/lib or a declared persistence root.";
+        message = "services.osmium.filesystemSnapshot.trackers.${name}.cacheDirectory must be a safe persistent path under /var/lib or a declared persistence root.";
       }
       {
         assertion = tracker.source != tracker.snapshotRoot;
-        message = "services.mythoclast.filesystemSnapshot.trackers.${name}.source and snapshotRoot must differ.";
+        message = "services.osmium.filesystemSnapshot.trackers.${name}.source and snapshotRoot must differ.";
       }
       {
         assertion = tracker.retention.count != null || tracker.retention.age != null;
-        message = "services.mythoclast.filesystemSnapshot.trackers.${name}.retention must specify count, age, or both.";
+        message = "services.osmium.filesystemSnapshot.trackers.${name}.retention must specify count, age, or both.";
       }
       {
         assertion = tracker.schedule != "";
-        message = "services.mythoclast.filesystemSnapshot.trackers.${name}.schedule must not be empty.";
+        message = "services.osmium.filesystemSnapshot.trackers.${name}.schedule must not be empty.";
       }
       {
         assertion = lib.all relativePatternIsSafe (tracker.exclusions ++ tracker.redactions);
-        message = "services.mythoclast.filesystemSnapshot.trackers.${name} exclusions and redactions must be non-empty relative paths without escaping components.";
+        message = "services.osmium.filesystemSnapshot.trackers.${name} exclusions and redactions must be non-empty relative paths without escaping components.";
       }
       {
         assertion = tracker.administrative.user != "" && tracker.administrative.group != "";
-        message = "services.mythoclast.filesystemSnapshot.trackers.${name} administrative user and group must not be empty.";
+        message = "services.osmium.filesystemSnapshot.trackers.${name} administrative user and group must not be empty.";
       }
     ])
     cfg.trackers);
 
-  lifecycleScript = pkgs.writeShellScriptBin "mythoclast-filesystem-snapshot" ''
+  lifecycleScript = pkgs.writeShellScriptBin "osmium-filesystem-snapshot" ''
     exec ${pkgs.python3}/bin/python ${../../tools/filesystem_snapshot.py} "$@"
   '';
 
   trackerServices = lib.mapAttrs'
-    (name: tracker: lib.nameValuePair "mythoclast-filesystem-snapshot-${name}-baseline" {
+    (name: tracker: lib.nameValuePair "osmium-filesystem-snapshot-${name}-baseline" {
       description = "Create the ${name} filesystem snapshot baseline";
       wantedBy = [ "multi-user.target" ];
       after = [ "local-fs.target" ];
       path = [ pkgs.btrfs-progs ];
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${lifecycleScript}/bin/mythoclast-filesystem-snapshot baseline --source ${lib.escapeShellArg tracker.source} --snapshot-root ${lib.escapeShellArg tracker.snapshotRoot} --state-dir ${lib.escapeShellArg tracker.stateDirectory}";
+        ExecStart = "${lifecycleScript}/bin/osmium-filesystem-snapshot baseline --source ${lib.escapeShellArg tracker.source} --snapshot-root ${lib.escapeShellArg tracker.snapshotRoot} --state-dir ${lib.escapeShellArg tracker.stateDirectory}";
       };
     })
     cfg.trackers;
 
   trackerObservationServices = lib.mapAttrs'
-    (name: tracker: lib.nameValuePair "mythoclast-filesystem-snapshot-${name}-observe" {
+    (name: tracker: lib.nameValuePair "osmium-filesystem-snapshot-${name}-observe" {
       description = "Capture the ${name} filesystem snapshot observation";
       path = [ pkgs.btrfs-progs ];
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${lifecycleScript}/bin/mythoclast-filesystem-snapshot observe --source ${lib.escapeShellArg tracker.source} --snapshot-root ${lib.escapeShellArg tracker.snapshotRoot} --state-dir ${lib.escapeShellArg tracker.stateDirectory}";
+        ExecStart = "${lifecycleScript}/bin/osmium-filesystem-snapshot observe --source ${lib.escapeShellArg tracker.source} --snapshot-root ${lib.escapeShellArg tracker.snapshotRoot} --state-dir ${lib.escapeShellArg tracker.stateDirectory}";
       };
     })
     cfg.trackers;
 
   trackerObservationTimers = lib.mapAttrs'
-    (name: tracker: lib.nameValuePair "mythoclast-filesystem-snapshot-${name}-observe-timer" {
+    (name: tracker: lib.nameValuePair "osmium-filesystem-snapshot-${name}-observe-timer" {
       wantedBy = [ "timers.target" ];
       timerConfig = {
         OnCalendar = tracker.schedule;
         Persistent = true;
-        Unit = "mythoclast-filesystem-snapshot-${name}-observe.service";
+        Unit = "osmium-filesystem-snapshot-${name}-observe.service";
       };
     })
     cfg.trackers;
 
   trackerReportServices = lib.mapAttrs'
-    (name: tracker: lib.nameValuePair "mythoclast-filesystem-snapshot-${name}-report" {
+    (name: tracker: lib.nameValuePair "osmium-filesystem-snapshot-${name}-report" {
       description = "Render the ${name} filesystem snapshot report";
-      after = [ "mythoclast-filesystem-snapshot-${name}-observe.service" ];
+      after = [ "osmium-filesystem-snapshot-${name}-observe.service" ];
       path = [ pkgs.btrfs-progs ];
       serviceConfig = {
         Type = "oneshot";
         User = tracker.administrative.user;
         Group = tracker.administrative.group;
         UMask = "0077";
-        ExecStart = "${lifecycleScript}/bin/mythoclast-filesystem-snapshot report --source ${lib.escapeShellArg tracker.source} --snapshot-root ${lib.escapeShellArg tracker.snapshotRoot} --state-dir ${lib.escapeShellArg tracker.stateDirectory} --snapshot-id latest --threshold ${toString tracker.contentThreshold} ${lib.concatMapStringsSep " " (pattern: "--exclude ${lib.escapeShellArg pattern}") tracker.exclusions} ${lib.concatMapStringsSep " " (pattern: "--redact ${lib.escapeShellArg pattern}") tracker.redactions} --cache-dir ${lib.escapeShellArg tracker.cacheDirectory} --report-json ${lib.escapeShellArg "${tracker.reportDirectory}/latest.json"} --report-text ${lib.escapeShellArg "${tracker.reportDirectory}/latest.txt"} --mode ${tracker.administrative.mode}";
+        ExecStart = "${lifecycleScript}/bin/osmium-filesystem-snapshot report --source ${lib.escapeShellArg tracker.source} --snapshot-root ${lib.escapeShellArg tracker.snapshotRoot} --state-dir ${lib.escapeShellArg tracker.stateDirectory} --snapshot-id latest --threshold ${toString tracker.contentThreshold} ${lib.concatMapStringsSep " " (pattern: "--exclude ${lib.escapeShellArg pattern}") tracker.exclusions} ${lib.concatMapStringsSep " " (pattern: "--redact ${lib.escapeShellArg pattern}") tracker.redactions} --cache-dir ${lib.escapeShellArg tracker.cacheDirectory} --report-json ${lib.escapeShellArg "${tracker.reportDirectory}/latest.json"} --report-text ${lib.escapeShellArg "${tracker.reportDirectory}/latest.txt"} --mode ${tracker.administrative.mode}";
       };
     })
     cfg.trackers;
 
   trackerReportTimers = lib.mapAttrs'
-    (name: tracker: lib.nameValuePair "mythoclast-filesystem-snapshot-${name}-report-timer" {
+    (name: tracker: lib.nameValuePair "osmium-filesystem-snapshot-${name}-report-timer" {
       wantedBy = [ "timers.target" ];
       timerConfig = {
         OnCalendar = tracker.reportSchedule;
         Persistent = true;
-        Unit = "mythoclast-filesystem-snapshot-${name}-report.service";
+        Unit = "osmium-filesystem-snapshot-${name}-report.service";
       };
     })
     cfg.trackers;
 
   trackerRetentionServices = lib.mapAttrs'
-    (name: tracker: lib.nameValuePair "mythoclast-filesystem-snapshot-${name}-retain" {
+    (name: tracker: lib.nameValuePair "osmium-filesystem-snapshot-${name}-retain" {
       description = "Retain ${name} filesystem snapshots";
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${lifecycleScript}/bin/mythoclast-filesystem-snapshot retain --source ${lib.escapeShellArg tracker.source} --snapshot-root ${lib.escapeShellArg tracker.snapshotRoot} --state-dir ${lib.escapeShellArg tracker.stateDirectory} ${lib.optionalString (tracker.retention.count != null) "--count ${toString tracker.retention.count}"} ${lib.optionalString (tracker.retention.age != null) "--age ${toString tracker.retention.age}"}";
+        ExecStart = "${lifecycleScript}/bin/osmium-filesystem-snapshot retain --source ${lib.escapeShellArg tracker.source} --snapshot-root ${lib.escapeShellArg tracker.snapshotRoot} --state-dir ${lib.escapeShellArg tracker.stateDirectory} ${lib.optionalString (tracker.retention.count != null) "--count ${toString tracker.retention.count}"} ${lib.optionalString (tracker.retention.age != null) "--age ${toString tracker.retention.age}"}";
       };
     })
     cfg.trackers;
 
   trackerRetentionTimers = lib.mapAttrs'
-    (name: tracker: lib.nameValuePair "mythoclast-filesystem-snapshot-${name}-retain-timer" {
+    (name: tracker: lib.nameValuePair "osmium-filesystem-snapshot-${name}-retain-timer" {
       wantedBy = [ "timers.target" ];
-      timerConfig = { OnCalendar = tracker.retentionSchedule; Persistent = true; Unit = "mythoclast-filesystem-snapshot-${name}-retain.service"; };
+      timerConfig = { OnCalendar = tracker.retentionSchedule; Persistent = true; Unit = "osmium-filesystem-snapshot-${name}-retain.service"; };
     })
     cfg.trackers;
 
   trackerPromotionServices = lib.filterAttrs (_: tracker: (tracker.promotionSnapshot or null) != null) (lib.mapAttrs'
-    (name: tracker: lib.nameValuePair "mythoclast-filesystem-snapshot-${name}-promote" {
+    (name: tracker: lib.nameValuePair "osmium-filesystem-snapshot-${name}-promote" {
       description = "Promote an explicit ${name} filesystem snapshot";
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${lifecycleScript}/bin/mythoclast-filesystem-snapshot promote --source ${lib.escapeShellArg tracker.source} --snapshot-root ${lib.escapeShellArg tracker.snapshotRoot} --state-dir ${lib.escapeShellArg tracker.stateDirectory} --snapshot-id ${lib.escapeShellArg (tracker.promotionSnapshot or "")}";
+        ExecStart = "${lifecycleScript}/bin/osmium-filesystem-snapshot promote --source ${lib.escapeShellArg tracker.source} --snapshot-root ${lib.escapeShellArg tracker.snapshotRoot} --state-dir ${lib.escapeShellArg tracker.stateDirectory} --snapshot-id ${lib.escapeShellArg (tracker.promotionSnapshot or "")}";
       };
     })
      cfg.trackers);
@@ -160,19 +160,19 @@ let
   trackerDeploymentServices = lib.foldl' (services: name:
     let tracker = cfg.trackers.${name}; in
     if tracker.bundlePath == null then services else services // {
-      "mythoclast-filesystem-snapshot-${name}-deploy" = {
+      "osmium-filesystem-snapshot-${name}-deploy" = {
         description = "Deploy the selected ${name} filesystem reconstruction bundle";
         after = [ "local-fs.target" ];
         serviceConfig = {
           Type = "oneshot";
           StandardInput = "file:${tracker.bundlePath}";
-          ExecStart = "${lifecycleScript}/bin/mythoclast-filesystem-snapshot deploy --destination ${lib.escapeShellArg tracker.deploymentDestination} ${lib.optionalString (tracker.bundlePayloadDirectory != null) "--payload-dir ${lib.escapeShellArg tracker.bundlePayloadDirectory}"}";
+          ExecStart = "${lifecycleScript}/bin/osmium-filesystem-snapshot deploy --destination ${lib.escapeShellArg tracker.deploymentDestination} ${lib.optionalString (tracker.bundlePayloadDirectory != null) "--payload-dir ${lib.escapeShellArg tracker.bundlePayloadDirectory}"}";
         };
       };
     }) { } (lib.attrNames cfg.trackers);
 in
 {
-  options.services.mythoclast.filesystemSnapshot = {
+  options.services.osmium.filesystemSnapshot = {
     enable = lib.mkEnableOption "filesystem snapshot drift tracking";
 
     trackers = lib.mkOption {
@@ -190,7 +190,7 @@ in
 
           stateDirectory = lib.mkOption {
             type = lib.types.str;
-            default = "${config.snapshotRoot}/.mythoclast";
+            default = "${config.snapshotRoot}/.osmium";
             description = "Persistent directory containing snapshot metadata and tracker state.";
           };
 
@@ -284,6 +284,7 @@ in
 
   config = lib.mkIf cfg.enable {
     assertions = trackerAssertions;
+    environment.systemPackages = [ lifecycleScript ];
     systemd.services = trackerServices // trackerObservationServices // trackerReportServices // trackerRetentionServices // trackerPromotionServices // trackerDeploymentServices;
     systemd.timers = trackerObservationTimers // trackerReportTimers // trackerRetentionTimers;
     environment.persistence."/persistent".directories = lib.concatLists (lib.mapAttrsToList
