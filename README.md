@@ -5,9 +5,9 @@ tested with impermanent guest filesystems.
 
 ## Status
 
-The project contains a small native NixOS HTTP service and a native Gitea
-service. Both are used to verify that declared state survives a reboot while
-the guest root filesystem is recreated.
+The project contains a small native NixOS HTTP service, Gitea integration, and
+filesystem snapshot workflows. They verify that declared state survives a
+reboot while the guest root filesystem is recreated.
 
 ## Design
 
@@ -16,6 +16,14 @@ the guest root filesystem is recreated.
 - Runtime state must be declared through impermanence.
 - Flake inputs and service versions must be pinned.
 - Configuration should be safe to evaluate and activate repeatedly.
+
+Osmium is the canonical active namespace. The compatibility module accepts the
+legacy `services.mythoclast.*` and `mythoclast.host` option paths, exposes
+bounded legacy command and systemd aliases, and rejects conflicting old/new
+declarations rather than creating duplicate services. On first activation it
+can migrate known persisted state, snapshot metadata, and credential markers
+to Osmium paths. The migration is repeatable and does not copy secret contents
+into logs or generated configuration.
 
 The examples are exposed as `nixosConfigurations.demo-guest`,
 `nixosConfigurations.gitea-guest`, and `nixosConfigurations.demo-host`.
@@ -74,6 +82,11 @@ A changed replacement credential is applied during configuration activation.
 The periodic check also rotates credentials after `maxAge` and retries failed
 rotations. A failed rotation leaves the current credential usable and does not
 record success; disabling rotation does not revert a completed rotation.
+
+The module also supports declarative Gitea users and organizations. Reconciled
+records are updated in place, but removing a declaration does not delete an
+existing Gitea record. Password-file changes trigger password rotation without
+putting the password value in the Nix store or logs.
 
 Declarative non-admin users and organizations can be provisioned with runtime
 password files:
@@ -155,6 +168,17 @@ This test runs a guest-local HTTP healthcheck against Gitea's
 `/api/healthz` endpoint on port `3000`, requiring HTTP `200`. It then creates a
 repository through the HTTP API, restarts the guest, and verifies the
 repository remains available and the Gitea state remains owned by `gitea`.
+
+Run the rebrand compatibility checks:
+
+```sh
+nix build .#checks.x86_64-linux.osmium-rebrand-fresh --print-build-logs
+nix build .#checks.x86_64-linux.osmium-rebrand-migration --print-build-logs
+```
+
+These boot MicroVMs and verify canonical Osmium units and commands, legacy
+aliases, persisted state migration, snapshot metadata conversion, credential
+marker migration, and service behavior after reboot.
 
 Service tests can reuse the structured helper in `tests/healthchecks.nix`:
 
@@ -239,6 +263,13 @@ Reports are deterministic and payload-free in human-readable form. Hash caching
 is used only for validated immutable snapshots; large trees should be scheduled
 appropriately because traversal and complete hashing remain the correctness
 boundary.
+
+The snapshot module also provides reviewable bundle export and explicit bundle
+deployment. Export is non-mutating and records incomplete, redacted, or
+unsupported changes instead of treating them as deletions. Deployment validates
+the reviewed bundle and destination preconditions before applying it; it is
+separate from export and is intentionally not advertised as atomic for a live
+destination.
 
 ### Bundle Review And Deployment
 
