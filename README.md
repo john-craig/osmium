@@ -138,6 +138,23 @@ commits changes. Administrator accounts, unsafe names, duplicate declaration
 keys, external identity-provider records, and ambiguous organization owners are
 reported as exclusions instead of candidates.
 
+### Remote Capture
+
+Enable the review-only remote capture command with
+`services.osmium.gitea.remoteCapture.enable = true`. It uses a fixed,
+allowlisted probe protocol over SSH and requires strict host-key verification:
+
+```sh
+osmium-gitea-remote capture --host gitea.example --user capture \
+  --known-hosts ~/.ssh/known_hosts --output /tmp/gitea-capture.json
+osmium-gitea-remote convert /tmp/gitea-capture.json --output /tmp/gitea-candidate.nix
+```
+
+The host, SSH identity, and optional API credentials remain operator-managed.
+Capture never evaluates remote Nix, reads secret bytes, writes the remote host,
+or activates a candidate. Unsupported, administrator, ambiguous, and missing
+secret state is recorded as a finding and makes the candidate non-activatable.
+
 ## Development
 
 Enter the development shell with `direnv`, or run:
@@ -162,6 +179,18 @@ Run the Gitea MicroVM integration test:
 
 ```sh
 nix build .#checks.x86_64-linux.gitea --print-build-logs
+```
+
+Run the remote capture contract MicroVM check:
+
+```sh
+nix build .#checks.x86_64-linux.remote-gitea-capture --print-build-logs
+```
+
+Run the real two-node remote capture MicroVM check:
+
+```sh
+nix build .#checks.x86_64-linux.remote-gitea-capture-real --print-build-logs
 ```
 
 This test runs a guest-local HTTP healthcheck against Gitea's

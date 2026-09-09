@@ -158,12 +158,22 @@
             module = self.nixosModules.default;
           };
 
-          gitea = import ./tests/gitea.nix {
+           gitea = import ./tests/gitea.nix {
             inherit pkgs microvm;
             lib = nixpkgs.lib;
             module = self.nixosModules.default;
-            healthchecks = import ./tests/healthchecks.nix { lib = nixpkgs.lib; };
-          };
+             healthchecks = import ./tests/healthchecks.nix { lib = nixpkgs.lib; };
+           };
+
+           remote-gitea-capture = import ./tests/remote-gitea-capture.nix {
+             inherit pkgs microvm;
+             module = self.nixosModules.default;
+           };
+
+           remote-gitea-capture-real = import ./tests/remote-gitea-capture-real.nix {
+             inherit pkgs microvm;
+             module = self.nixosModules.default;
+           };
 
           osmium-rebrand-fresh = rebrand.osmium-rebrand-fresh;
           osmium-rebrand-migration = rebrand.osmium-rebrand-migration;

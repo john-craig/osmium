@@ -158,6 +158,12 @@ let
       printf '%s\n' "$rendered"
     fi
   '';
+  remoteCaptureScript = pkgs.writeShellScriptBin "osmium-gitea-remote" ''
+    exec ${pkgs.python3}/bin/python ${../../tools/remote_gitea_capture.py} "$@"
+  '';
+  remoteProbeScript = pkgs.writeShellScriptBin "osmium-gitea-probe" ''
+    exec ${pkgs.python3}/bin/python ${../../tools/remote_gitea_capture.py} probe "$@"
+  '';
   driftScript = pkgs.writeShellScriptBin "osmium-gitea-drift" ''
     set -eu
 
@@ -549,6 +555,10 @@ in
       enable = lib.mkEnableOption "review-only Gitea configuration candidate export";
     };
 
+    remoteCapture = {
+      enable = lib.mkEnableOption "the review-only remote Gitea capture CLI";
+    };
+
     admin = {
       enable = lib.mkEnableOption "the initial Gitea administrator bootstrap";
 
@@ -662,7 +672,7 @@ in
     };
     users.groups.gitea.gid = 992;
 
-    environment.systemPackages = lib.mkIf (cfg.driftDetection.enable || cfg.reverseConfiguration.enable) [ driftScript exportScript ];
+    environment.systemPackages = lib.mkIf (cfg.driftDetection.enable || cfg.reverseConfiguration.enable || cfg.remoteCapture.enable) ([ driftScript exportScript ] ++ lib.optionals cfg.remoteCapture.enable [ remoteCaptureScript remoteProbeScript ]);
 
     services.gitea = {
       enable = true;
