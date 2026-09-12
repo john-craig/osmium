@@ -112,6 +112,41 @@ updates declared metadata, while removing a declaration does not delete or
 transfer an existing Gitea record. Changing a user's secret-file value rotates
 that user's password during reconciliation.
 
+Repositories can be declared by stable owner/name identity. The owner is either
+an available user or organization, and repository declarations manage metadata
+only:
+
+```nix
+services.osmium.gitea.repositories.project = {
+  owner.user = "project-user";
+  name = "project-repository";
+  description = "Declarative project repository";
+  private = true;
+  defaultBranch = "main";
+  website = "https://example.com/project-repository";
+  issues = true;
+  wiki = false;
+  pullRequests = true;
+  contentScope = "metadata-only";
+};
+```
+
+Repositories are created after their declared owners and reconciled through the
+runtime Gitea API. Existing content and history are preserved, supported
+metadata is updated in place, and removing a declaration does not delete or
+transfer the repository. The module persists repository state with `stateDir`
+and reads the administrator credential from its configured secret-file path at
+runtime; secret contents are not evaluated into Nix or stored in markers.
+
+Repository reverse configuration is review-only. Drift conversion compares
+declared and observed owner/name records and supported metadata. Live capture
+uses the runtime Gitea API, preserves user and organization ownership, sorts
+records deterministically, and records provenance and incomplete or unsupported
+state. Both paths omit passwords, tokens, deploy keys, webhook secrets, and
+repository contents. Review the generated candidate, provide any required
+secret-file references, evaluate it, and activate it through the normal NixOS
+workflow; capture and conversion do not mutate Gitea or source state.
+
 ### Reverse Configuration Export
 
 Enable the review-only exporter alongside drift detection:
@@ -191,6 +226,13 @@ Run the real two-node remote capture MicroVM check:
 
 ```sh
 nix build .#checks.x86_64-linux.remote-gitea-capture-real --print-build-logs
+```
+
+Run the repository reverse-configuration MicroVM checks:
+
+```sh
+nix build .#checks.x86_64-linux.gitea-repository-drift-reverse-configuration --print-build-logs
+nix build .#checks.x86_64-linux.gitea-repository-live-capture-reverse-configuration --print-build-logs
 ```
 
 This test runs a guest-local HTTP healthcheck against Gitea's

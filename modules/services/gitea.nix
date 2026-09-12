@@ -8,7 +8,9 @@ let
   legacyAdminBootstrapMarker = "${cfg.stateDir}/.mythoclast-admin-bootstrap-complete";
   adminRotationState = "${cfg.stateDir}/.osmium-admin-rotation";
   identityDefinitions = lib.attrValues cfg.users;
+  repositoryDefinitions = lib.attrValues cfg.repositories;
   identityReconciliationEnabled = cfg.users != { } || cfg.organizations != { };
+  repositoryReconciliationEnabled = cfg.repositories != { };
   adminCredentialFile = cfg.admin.passwordFile;
   adminRotationPasswordFile = if cfg.admin.rotation.passwordFile == null then "/dev/null" else cfg.admin.rotation.passwordFile;
   driftHistoryFile = "${cfg.stateDir}/.osmium-drift-history";
@@ -23,6 +25,18 @@ let
     description = organization.description;
     visibility = organization.visibility;
   }) cfg.organizations);
+  declaredDriftRepositories = builtins.toJSON (lib.mapAttrsToList (_: repository: {
+    owner_kind = if repository.owner.user != null then "user" else "organization";
+    owner = if repository.owner.user != null then repository.owner.user else repository.owner.organization;
+    name = repository.name;
+    description = repository.description;
+    private = repository.private;
+    default_branch = if repository.defaultBranch == null then "" else repository.defaultBranch;
+    website = repository.website;
+    issues = repository.issues;
+    wiki = repository.wiki;
+    pull_requests = repository.pullRequests;
+  }) cfg.repositories);
   exportFilter = pkgs.writeText "osmium-gitea-export-filter.jq" ''
     "# Generated Gitea configuration candidate; review before activation.",
     "# Export is read-only and does not adopt records.",
@@ -202,20 +216,27 @@ let
     trap 'rm -rf "$tmp_dir"' EXIT
     users_file="$tmp_dir/users.json"
     orgs_file="$tmp_dir/orgs.json"
+    repos_file="$tmp_dir/repos.json"
+    org_repos_file="$tmp_dir/org-repos.json"
     printf '[]' > "$users_file"
     printf '[]' > "$orgs_file"
+    printf '[]' > "$repos_file"
+    printf '[]' > "$org_repos_file"
 
     collect_pages() {
       endpoint=$1
       target=$2
       page=1
       while :; do
+        endpoint_url="$api/$endpoint?limit=50&page=$page"
+        [ "$endpoint" = "repos/search" ] && endpoint_url="$endpoint_url&private=true"
         response="$(${pkgs.curl}/bin/curl --fail --silent --show-error --user "$admin_username:$admin_password" \
-          "$api/$endpoint?limit=50&page=$page")" || return 1
-        ${pkgs.jq}/bin/jq -e 'type == "array"' >/dev/null <<<"$response" || return 1
-        ${pkgs.jq}/bin/jq -s '.[0] + .[1]' "$target" <(${pkgs.jq}/bin/jq -c '.' <<<"$response") > "$target.next"
+          "$endpoint_url")" || return 1
+        batch=$(${pkgs.jq}/bin/jq -c 'if type == "array" then . else .data // empty end' <<<"$response")
+        [ -n "$batch" ] && ${pkgs.jq}/bin/jq -e 'type == "array"' >/dev/null <<<"$batch" || return 1
+        ${pkgs.jq}/bin/jq -s '.[0] + .[1]' "$target" <(${pkgs.jq}/bin/jq -c '.' <<<"$batch") > "$target.next"
         mv "$target.next" "$target"
-        count=$(${pkgs.jq}/bin/jq 'length' <<<"$response")
+        count=$(${pkgs.jq}/bin/jq 'length' <<<"$batch")
         [ "$count" -lt 50 ] && break
         page=$((page + 1))
       done
@@ -233,6 +254,16 @@ let
       fi
       exit 2
     fi
+    for owner in $(${pkgs.jq}/bin/jq -r '.[].login // .[].username // empty' "$users_file"); do
+      case "$owner" in *[!A-Za-z0-9._-]*) continue ;; esac
+      collect_pages "users/$owner/repos" "$repos_file" || exit 2
+    done
+    for owner in $(${pkgs.jq}/bin/jq -r '.[].name // .[].username // empty' "$orgs_file"); do
+      case "$owner" in *[!A-Za-z0-9._-]*) continue ;; esac
+      collect_pages "orgs/$owner/repos" "$org_repos_file" || exit 2
+    done
+    ${pkgs.jq}/bin/jq -s '.[0] + ([.[1][] | . + {owner_kind: "organization"}])' "$repos_file" "$org_repos_file" > "$repos_file.next"
+    mv "$repos_file.next" "$repos_file"
 
     users=$(${pkgs.jq}/bin/jq -c '[.[] | {
       username: (.login // .username // ""),
@@ -248,14 +279,30 @@ let
       visibility: (.visibility // ""),
       owner: (.owner.login // .owner.username // .owner // "")
     }] | sort_by(.name)' "$orgs_file")
+    repositories=$(${pkgs.jq}/bin/jq -c '[.[] | {
+      owner_kind: (if (.owner_type == "Organization" or .owner.type == "Organization") then "organization" else "user" end),
+      owner: (.owner.login // .owner.username // ""),
+      name: (.name // ""),
+      description: (.description // ""),
+      private: (.private // false),
+      default_branch: (.default_branch // ""),
+      website: (.website // ""),
+      issues: (.has_issues // false),
+      wiki: (.has_wiki // false),
+      pull_requests: (.has_pull_requests // false),
+      provenance: {id: .id, api: "owner/repos"}
+    }] | sort_by([.owner_kind, .owner, .name])' "$repos_file")
     desired_users=${lib.escapeShellArg declaredDriftUsers}
     desired_orgs=${lib.escapeShellArg declaredDriftOrganizations}
+    desired_repositories=${lib.escapeShellArg declaredDriftRepositories}
 
     report=$(${pkgs.jq}/bin/jq -cn \
       --argjson observed_users "$users" \
       --argjson observed_orgs "$organizations" \
       --argjson desired_users "$desired_users" \
       --argjson desired_orgs "$desired_orgs" \
+      --argjson observed_repositories "$repositories" \
+      --argjson desired_repositories "$desired_repositories" \
       --arg observed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
       def user_fields: ["email"];
       def org_fields: ["description", "visibility", "owner"];
@@ -285,11 +332,25 @@ let
             {kind: (if $differences == [] then "matching" elif ([$differences[].field] | index("owner")) != null then "ownership-conflict" else "changed" end), resource: "organization", name: $observed.name, differences: $differences}
           end] +
         [$desired_orgs[] as $desired | select(($observed_orgs | map(select(.name == $desired.name))) == []) |
-          {kind: "missing", resource: "organization", name: $desired.name, declared: $desired}];
-      (user_classifications + org_classifications) as $classifications |
+           {kind: "missing", resource: "organization", name: $desired.name, declared: $desired}];
+      def repository_classifications:
+        [$observed_repositories[] as $observed |
+          ($desired_repositories | map(select(.owner_kind == $observed.owner_kind and .owner == $observed.owner and .name == $observed.name)) | first) as $desired |
+          if $desired == null then
+            {kind: "unmanaged", resource: "repository", owner_kind: $observed.owner_kind, owner: $observed.owner, name: $observed.name, observed: $observed}
+          else
+            (["description", "private", "default_branch", "website", "issues", "wiki", "pull_requests"] as $fields |
+             [$fields[] as $field | select(($observed[$field] // "") != ($desired[$field] // "")) |
+               {field: $field, observed: ($observed[$field] // ""), declared: ($desired[$field] // "")}]) as $differences |
+            {kind: (if $differences == [] then "matching" else "changed" end), resource: "repository", owner_kind: $observed.owner_kind, owner: $observed.owner, name: $observed.name, differences: $differences}
+          end] +
+        [$desired_repositories[] as $desired | select(($observed_repositories | map(select(.owner_kind == $desired.owner_kind and .owner == $desired.owner and .name == $desired.name))) == []) |
+          {kind: "missing", resource: "repository", owner_kind: $desired.owner_kind, owner: $desired.owner, name: $desired.name, declared: $desired}];
+      (user_classifications + org_classifications + repository_classifications) as $classifications |
       {schema_version: 1, observed_at: $observed_at,
        status: (if ([$classifications[] | select(.kind != "matching")] | length) == 0 then "clean" else "drift" end),
-       users: $observed_users, organizations: $observed_orgs, classifications: $classifications,
+       users: $observed_users, organizations: $observed_orgs, repositories: $observed_repositories,
+       declared_repositories: $desired_repositories, classifications: $classifications,
        errors: []}' )
 
     canonical=$(${pkgs.jq}/bin/jq -cS 'del(.observed_at)' <<<"$report")
@@ -424,6 +485,48 @@ let
           ;;
       esac
     '') (lib.attrNames cfg.organizations);
+  repositoryReconciliation = lib.concatMapStringsSep "\n" (name:
+    let
+      repository = cfg.repositories.${name};
+      ownerKind = if repository.owner.user != null then "user" else "organization";
+      ownerName = if repository.owner.user != null then repository.owner.user else repository.owner.organization;
+      repositoryPath = "${ownerName}/${repository.name}";
+      createEndpoint = if ownerKind == "user" then "admin/users/${ownerName}/repos" else "org/${ownerName}/repos";
+      updateEndpoint = "repos/${ownerName}/${repository.name}";
+    in
+    ''
+      repository_payload="$(${pkgs.jq}/bin/jq -cn \
+        --arg name ${lib.escapeShellArg repository.name} \
+        --arg description ${lib.escapeShellArg repository.description} \
+        --arg default_branch ${lib.escapeShellArg (if repository.defaultBranch == null then "" else repository.defaultBranch)} \
+        --arg website ${lib.escapeShellArg repository.website} \
+        --argjson private ${lib.boolToString repository.private} \
+        --argjson has_issues ${lib.boolToString repository.issues} \
+        --argjson has_wiki ${lib.boolToString repository.wiki} \
+        --argjson has_pull_requests ${lib.boolToString repository.pullRequests} \
+        '{name: $name, description: $description, private: $private, website: $website, has_issues: $has_issues, has_wiki: $has_wiki, has_pull_requests: $has_pull_requests} + (if $default_branch == "" then {} else {default_branch: $default_branch} end)')"
+      repository_status=$(${pkgs.curl}/bin/curl -sS -o /dev/null -w '%{http_code}' \
+        --user ${lib.escapeShellArg cfg.admin.username}:"$admin_password" \
+        "http://127.0.0.1:${toString cfg.httpPort}/api/v1/repos/${repositoryPath}")
+      case "$repository_status" in
+        200)
+          ${pkgs.curl}/bin/curl --fail --silent --show-error \
+            --user ${lib.escapeShellArg cfg.admin.username}:"$admin_password" \
+            -X PATCH "http://127.0.0.1:${toString cfg.httpPort}/api/v1/${updateEndpoint}" \
+            -H 'Content-Type: application/json' --data "$repository_payload" >/dev/null
+          ;;
+        404)
+          ${pkgs.curl}/bin/curl --fail --silent --show-error \
+            --user ${lib.escapeShellArg cfg.admin.username}:"$admin_password" \
+            -X POST "http://127.0.0.1:${toString cfg.httpPort}/api/v1/${createEndpoint}" \
+            -H 'Content-Type: application/json' --data "$repository_payload" >/dev/null
+          ;;
+        *)
+          echo "Unable to inspect declared Gitea repository ${lib.escapeShellArg "${ownerName}/${repository.name}"} (HTTP $repository_status)" >&2
+          exit 1
+          ;;
+      esac
+    '') (lib.attrNames cfg.repositories);
 in
 {
   options.services.osmium.gitea = {
@@ -517,6 +620,76 @@ in
       }));
       default = { };
       description = "Declarative Gitea organizations owned by declared users.";
+    };
+
+    repositories = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.submodule ({ ... }: {
+        options = {
+          owner = lib.mkOption {
+            type = lib.types.submodule ({ ... }: {
+              options = {
+                user = lib.mkOption {
+                  type = lib.types.nullOr lib.types.str;
+                  default = null;
+                  description = "Username of the Gitea user that owns this repository.";
+                };
+                organization = lib.mkOption {
+                  type = lib.types.nullOr lib.types.str;
+                  default = null;
+                  description = "Name of the Gitea organization that owns this repository.";
+                };
+              };
+            });
+            description = "Exactly one declared or existing Gitea user or organization owner.";
+          };
+          name = lib.mkOption {
+            type = lib.types.str;
+            description = "Stable Gitea repository name.";
+          };
+          description = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Repository description.";
+          };
+          private = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = "Whether the repository is private.";
+          };
+          defaultBranch = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "Optional default branch name.";
+          };
+          website = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Repository website URL.";
+          };
+          issues = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = "Whether Gitea issues are enabled.";
+          };
+          wiki = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = "Whether the Gitea wiki is enabled.";
+          };
+          pullRequests = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = "Whether Gitea pull requests are enabled.";
+          };
+          contentScope = lib.mkOption {
+            type = lib.types.enum [ "metadata-only" ];
+            default = "metadata-only";
+            description = "Explicit boundary for repository content management.";
+          };
+        };
+      }));
+      default = { };
+      description = "Declarative Gitea repositories keyed by stable local declaration names.";
     };
 
     driftDetection = {
@@ -660,6 +833,35 @@ in
           && lib.any (user: user.username == organization.owner) identityDefinitions
         ) (lib.attrValues cfg.organizations);
         message = "Declarative Gitea organizations require safe names and declared user owners.";
+      }
+      {
+        assertion = lib.all (repository:
+          (repository.owner.user != null) != (repository.owner.organization != null)
+        ) repositoryDefinitions;
+        message = "Declarative Gitea repositories require exactly one user or organization owner.";
+      }
+      {
+        assertion = lib.all (repository:
+          let
+            owner = if repository.owner.user != null then repository.owner.user else repository.owner.organization;
+          in
+          builtins.match "[A-Za-z0-9._-]+" owner != null
+          && builtins.match "[A-Za-z0-9._-]+" repository.name != null
+        ) repositoryDefinitions;
+        message = "Declarative Gitea repository owners and names may contain only letters, numbers, dots, underscores, and hyphens.";
+      }
+      {
+        assertion =
+          let
+            identities = map (repository:
+              let
+                ownerKind = if repository.owner.user != null then "user" else "organization";
+                ownerName = if repository.owner.user != null then repository.owner.user else repository.owner.organization;
+              in
+              "${ownerKind}:${ownerName}:${repository.name}") repositoryDefinitions;
+          in
+          lib.length (lib.unique identities) == lib.length identities;
+        message = "Declarative Gitea repository owner and name identities must be unique.";
       }
     ];
 
@@ -850,6 +1052,38 @@ in
     system.activationScripts.osmium-gitea-identities = lib.mkIf identityReconciliationEnabled {
       text = ''
         ${pkgs.systemd}/bin/systemctl restart osmium-gitea-identities.service || true
+      '';
+    };
+
+    systemd.services.osmium-gitea-repositories = lib.mkIf repositoryReconciliationEnabled {
+      description = "Reconcile declarative Osmium Gitea repositories";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "gitea.service" "osmium-gitea-admin-bootstrap.service" ] ++ lib.optional identityReconciliationEnabled "osmium-gitea-identities.service";
+      requires = [ "gitea.service" "osmium-gitea-admin-bootstrap.service" ] ++ lib.optional identityReconciliationEnabled "osmium-gitea-identities.service";
+      serviceConfig = {
+        Type = "oneshot";
+        User = "gitea";
+        Group = "gitea";
+        UMask = "0077";
+        ExecStart = pkgs.writeShellScript "osmium-gitea-repositories" ''
+          set -eu
+          admin_username=${lib.escapeShellArg cfg.admin.username}
+          admin_password=$(cat ${lib.escapeShellArg adminCredentialFile})
+          if [ -s ${lib.escapeShellArg adminRotationPasswordFile} ]; then
+            admin_password=$(cat ${lib.escapeShellArg adminRotationPasswordFile})
+          fi
+          if [ -z "$admin_password" ]; then
+            echo "Gitea administrator credential file is empty" >&2
+            exit 1
+          fi
+          ${repositoryReconciliation}
+        '';
+      };
+    };
+
+    system.activationScripts.osmium-gitea-repositories = lib.mkIf repositoryReconciliationEnabled {
+      text = ''
+        ${pkgs.systemd}/bin/systemctl restart osmium-gitea-repositories.service || true
       '';
     };
 

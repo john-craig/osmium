@@ -31,6 +31,12 @@ SAFE_PATH = re.compile(r"^/(?:var/lib/gitea|etc/gitea|run/gitea)(?:/.*)?$")
 SENSITIVE = re.compile(
     r"(?:password|passwd|secret|token|api[_-]?key|private[_-]?key|hash|credential)", re.I
 )
+REPOSITORY_FIELDS = ("description", "private", "default_branch", "website", "issues", "wiki", "pull_requests")
+REPOSITORY_API_FIELDS = {
+    "has_issues": "issues",
+    "has_wiki": "wiki",
+    "has_pull_requests": "pull_requests",
+}
 
 
 class CaptureError(RuntimeError):
@@ -64,6 +70,39 @@ def _sort_records(records: Sequence[Mapping[str, Any]], key: str) -> list[dict[s
     return [dict(item) for item in sorted(records, key=lambda item: (str(item.get(key, "")).casefold(), canonical_json(item)))]
 
 
+def _repository_key(repository: Mapping[str, Any]) -> tuple[str, str, str]:
+    return (str(repository.get("owner_kind", "")).casefold(), str(repository.get("owner", "")).casefold(), str(repository.get("name", "")).casefold())
+
+
+def _normalize_repository(value: Mapping[str, Any]) -> dict[str, Any]:
+    owner = value.get("owner")
+    if isinstance(owner, Mapping):
+        owner_kind = "user" if owner.get("user") else "organization" if owner.get("organization") else ""
+        owner = owner.get("login") or owner.get("username") or owner.get("name") or owner.get("user") or owner.get("organization")
+    else:
+        owner_kind = ""
+    record: dict[str, Any] = {
+        "owner_kind": str(value.get("owner_kind") or value.get("owner_type") or value.get("kind") or value.get("ownerType") or owner_kind).casefold(),
+        "owner": str(owner or ""),
+        "name": str(value.get("name") or value.get("repo") or ""),
+    }
+    for field in REPOSITORY_FIELDS:
+        api_field = next((key for key, normalized in REPOSITORY_API_FIELDS.items() if normalized == field), field)
+        if field in value:
+            record[field] = value[field]
+        elif api_field in value:
+            record[field] = value[api_field]
+    record["unsupported"] = sorted(str(item) for item in value.get("unsupported", []))
+    if value.get("content_required") or value.get("contents") or value.get("git_objects"):
+        record["unsupported"].append("repository-content")
+    if any(key in value for key in ("webhooks", "deploy_keys", "hooks", "collaborators")):
+        record["unsupported"].append("sensitive-or-unmanaged-integrations")
+    record["unsupported"] = sorted(set(record["unsupported"]))
+    if "provenance" in value:
+        record["provenance"] = _clean(value["provenance"])
+    return record
+
+
 def validate_path(value: str) -> str:
     if not isinstance(value, str) or not SAFE_PATH.fullmatch(value):
         raise CaptureError(f"path is outside the supported allowlist: {value!r}")
@@ -83,6 +122,15 @@ def normalize_capture(document: Mapping[str, Any]) -> dict[str, Any]:
         raise CaptureError("unsupported adapter")
     result["users"] = _sort_records(result["users"], "username")
     result["organizations"] = _sort_records(result["organizations"], "name")
+    result["repositories"] = sorted(
+        (_normalize_repository(item) for item in result.get("repositories", [])),
+        key=lambda item: (_repository_key(item), canonical_json(item)),
+    )
+    for repository in result["repositories"]:
+        if not repository["owner_kind"] or not repository["owner"] or not repository["name"]:
+            result["findings"].append(_finding("repository-required-field-missing", "required", repository=repository))
+        if repository["owner_kind"] not in {"user", "organization"}:
+            result["findings"].append(_finding("ambiguous-owner", "required", repository=repository))
     result["persistence"] = sorted(result.get("persistence", []), key=canonical_json)
     for item in result["persistence"]:
         if isinstance(item, Mapping) and "path" in item:
@@ -114,6 +162,7 @@ def convert_capture(document: Mapping[str, Any], secret_files: Mapping[str, str]
     secret_files = dict(secret_files or {})
     users: dict[str, dict[str, Any]] = {}
     organizations: dict[str, dict[str, Any]] = {}
+    repositories: dict[str, dict[str, Any]] = {}
     findings = list(capture["findings"])
 
     for user in capture["users"]:
@@ -160,6 +209,28 @@ def convert_capture(document: Mapping[str, Any], secret_files: Mapping[str, str]
 
     for item in capture.get("unsupported", []):
         findings.append(_finding("unsupported-state", "required", resource=item))
+    for repository in capture.get("repositories", []):
+        owner_kind = repository.get("owner_kind")
+        owner = str(repository.get("owner", ""))
+        name = str(repository.get("name", ""))
+        if owner_kind not in {"user", "organization"} or not owner or not SAFE_NAME.fullmatch(owner):
+            findings.append(_finding("ambiguous-owner", "required", resource="repository", owner=owner, name=name))
+            continue
+        if not name or not SAFE_NAME.fullmatch(name):
+            findings.append(_finding("unsafe-name", "error", resource="repository", owner=owner, name=name))
+            continue
+        key = "repository_" + re.sub(r"[^a-z0-9]+", "_", f"{owner}_{name}".casefold()).strip("_")
+        if key in repositories:
+            findings.append(_finding("duplicate-declaration-key", "error", resource="repository", owner=owner, name=name))
+            continue
+        entry = {
+            "owner": {"user": owner} if owner_kind == "user" else {"organization": owner},
+            "name": name,
+        }
+        entry.update({field: repository[field] for field in REPOSITORY_FIELDS if field in repository})
+        repositories[key] = entry
+        for unsupported in repository.get("unsupported", []):
+            findings.append(_finding("unsupported-state", "required", resource="repository", owner=owner, name=name, field=unsupported))
     findings = sorted(findings, key=lambda item: (item.get("code", ""), canonical_json(item)))
     complete = bool(capture["complete"]) and not any(item["severity"] in {"error", "required"} for item in findings)
     return {
@@ -174,6 +245,7 @@ def convert_capture(document: Mapping[str, Any], secret_files: Mapping[str, str]
             "persistence": capture.get("persistence", []),
             "users": dict(sorted(users.items())),
             "organizations": dict(sorted(organizations.items())),
+            "repositories": dict(sorted(repositories.items())),
         },
         "findings": findings,
     }
@@ -202,8 +274,68 @@ def render_nix(candidate: Mapping[str, Any]) -> str:
     lines += ["  };", "  organizations = {"]
     for key, org in sorted(gitea["organizations"].items()):
         lines.append(f"    {key} = {{ name = {nix(org['name'])}; owner = {nix(org['owner'])}; description = {nix(org['description'])}; visibility = {nix(org['visibility'])}; }};")
+    lines += ["  };", "  repositories = {"]
+    for key, repository in sorted(gitea.get("repositories", {}).items()):
+        fields = " ".join(f"{name} = {nix(repository[name])};" for name in sorted(repository))
+        lines.append(f"    {key} = {{ {fields} }};")
     lines += ["  };", "};", ""]
     return "\n".join(lines)
+
+
+def _declared_repositories(declared: Mapping[str, Any] | Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    values: Any = declared
+    if isinstance(declared, Mapping):
+        values = declared.get("repositories", declared.get("gitea", {}).get("repositories", []))
+    if isinstance(values, Mapping):
+        values = list(values.values())
+    return sorted((_normalize_repository(item) for item in values), key=lambda item: (_repository_key(item), canonical_json(item)))
+
+
+def compare_repository_drift(declared: Mapping[str, Any] | Sequence[Mapping[str, Any]], observed: Mapping[str, Any] | Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Compare repository metadata without contacting or mutating Gitea."""
+    identity_key = lambda item: (str(item.get("owner", "")).casefold(), str(item.get("name", "")).casefold())
+    left = {identity_key(item): item for item in _declared_repositories(declared)}
+    right = {identity_key(item): item for item in _declared_repositories(observed)}
+    changes: list[dict[str, Any]] = []
+    for identity in sorted(set(left) | set(right)):
+        before, after = left.get(identity), right.get(identity)
+        report_identity = [str((after or before).get("owner_kind", "")), *identity]
+        if before is None:
+            changes.append({"classification": "added", "identity": report_identity, "observed": after})
+            continue
+        if after is None:
+            changes.append({"classification": "removed", "identity": report_identity, "declared": before})
+            continue
+        for field in REPOSITORY_FIELDS:
+            if before.get(field) != after.get(field):
+                changes.append({"classification": "modified", "identity": report_identity, "field": field, "declared": before.get(field), "observed": after.get(field)})
+        if before.get("owner_kind") != after.get("owner_kind"):
+            changes.append({"classification": "owner-conflict", "identity": report_identity, "declared": before.get("owner_kind"), "observed": after.get("owner_kind")})
+        for field in after.get("unsupported", []):
+            changes.append({"classification": "unsupported", "identity": report_identity, "field": field})
+    return {"schema": "osmium.remote-gitea-drift", "version": 1, "complete": not any(item["classification"] == "owner-conflict" for item in changes), "changes": changes}
+
+
+def convert_drift(document: Mapping[str, Any], secret_files: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Convert observed additions and modifications into the normal candidate shape."""
+    observations: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for change in document.get("changes", []):
+        identity = tuple(change.get("identity", ()))
+        if isinstance(change.get("observed"), Mapping):
+            observations[identity] = dict(change["observed"])
+        elif change.get("classification") == "modified" and len(identity) == 3:
+            item = observations.setdefault(identity, {"owner_kind": identity[0], "owner": identity[1], "name": identity[2]})
+            item[change.get("field", "")] = change.get("observed")
+        elif change.get("classification") == "unsupported" and len(identity) == 3:
+            item = observations.setdefault(identity, {"owner_kind": identity[0], "owner": identity[1], "name": identity[2]})
+            item.setdefault("unsupported", []).append(change.get("field", "unsupported-state"))
+    candidate = convert_capture({**_empty_capture(), "repositories": list(observations.values()), "complete": document.get("complete", False)}, secret_files)
+    candidate["source"]["schema"] = document.get("schema", "osmium.remote-gitea-drift")
+    return candidate
+
+
+def _empty_capture() -> dict[str, Any]:
+    return {"schema": SCHEMA, "version": SCHEMA_VERSION, "adapter": {"name": ADAPTER, "version": ADAPTER_VERSION}, "source": {"origin": "observed"}, "scope": "gitea", "service": {}, "users": [], "organizations": [], "repositories": [], "persistence": [], "probes": [], "findings": [], "complete": True}
 
 
 @dataclass
@@ -266,19 +398,32 @@ def local_probe(name: str) -> dict[str, Any]:
         if not token_file:
             return {"status": "unsupported", "findings": [_finding("identity-observation-unavailable", "required")], "users": [], "organizations": []}
         try:
-            token = open(token_file, encoding="utf-8").read().strip()
+            with open(token_file, encoding="utf-8") as handle:
+                token = handle.read().strip()
             if not token:
                 raise OSError("empty token")
             base = os.environ.get("OSMIUM_GITEA_API_URL", "http://127.0.0.1:3000/api/v1").rstrip("/")
+            api_username = os.environ.get("OSMIUM_GITEA_API_USERNAME")
 
             def pages(endpoint: str) -> list[dict[str, Any]]:
                 records = []
                 page = 1
                 while True:
-                    request = urllib.request.Request(f"{base}/{endpoint}?limit=50&page={page}", headers={"Authorization": f"token {token}"})
+                    endpoint_url = f"{base}/{endpoint}?limit=50&page={page}"
+                    if endpoint == "repos/search":
+                        endpoint_url += "&private=true"
+                    request = urllib.request.Request(endpoint_url)
+                    if api_username:
+                        import base64
+                        credentials = base64.b64encode(f"{api_username}:{token}".encode()).decode()
+                        request.add_header("Authorization", f"Basic {credentials}")
+                    else:
+                        request.add_header("Authorization", f"token {token}")
                     with urllib.request.urlopen(request, timeout=10) as response:
                         batch = json.load(response)
-                    if not isinstance(batch, list):
+                    if isinstance(batch, dict) and isinstance(batch.get("data"), list):
+                        batch = batch["data"]
+                    if not isinstance(batch, list) or any(not isinstance(item, dict) for item in batch):
                         raise ValueError("API returned a non-list")
                     records.extend(batch)
                     if len(batch) < 50:
@@ -287,7 +432,30 @@ def local_probe(name: str) -> dict[str, Any]:
 
             users = [{"username": item.get("login", ""), "email": item.get("email", ""), "admin": bool(item.get("is_admin", False)), "source": "local"} for item in pages("admin/users")]
             organizations = [{"name": item.get("username", ""), "description": item.get("description", ""), "visibility": item.get("visibility", ""), "owner": (item.get("owner") or {}).get("login", "")} for item in pages("admin/orgs")]
-            return {"status": "ok", "users": users, "organizations": organizations}
+            repositories = []
+            repository_pages = []
+            for user in users:
+                repository_pages.extend((item, "user") for item in pages(f"users/{user['username']}/repos"))
+            for organization in organizations:
+                repository_pages.extend((item, "organization") for item in pages(f"orgs/{organization['name']}/repos"))
+            if not repository_pages:
+                repository_pages = [(item, "organization" if item.get("owner_type") == "Organization" or (item.get("owner") or {}).get("type") == "Organization" else "user") for item in pages("repos/search")]
+            for item, owner_kind in repository_pages:
+                owner = item.get("owner") or {}
+                repositories.append({
+                    "owner_kind": owner_kind,
+                    "owner": owner.get("login") or owner.get("username") or "",
+                    "name": item.get("name", ""),
+                    "description": item.get("description", ""),
+                    "private": bool(item.get("private", False)),
+                    "default_branch": item.get("default_branch", ""),
+                    "website": item.get("website", ""),
+                    "issues": bool(item.get("has_issues", False)),
+                    "wiki": bool(item.get("has_wiki", False)),
+                    "pull_requests": bool(item.get("has_pull_requests", False)),
+                    "provenance": {"id": item.get("id"), "api": "owner/repos"},
+                })
+            return {"status": "ok", "users": users, "organizations": organizations, "repositories": repositories, "capabilities": {"repository_fields": list(REPOSITORY_FIELDS), "endpoint": "owner/repos"}}
         except (OSError, ValueError, urllib.error.URLError) as error:
             return {"status": "error", "findings": [_finding("identity-observation-failed", "error")], "error_class": type(error).__name__, "users": [], "organizations": []}
 
@@ -327,6 +495,8 @@ def capture(transport: SSHTransport, scope: str = "gitea") -> dict[str, Any]:
         "service": service,
         "users": observations["identities"].get("users", []),
         "organizations": observations["identities"].get("organizations", []),
+        "repositories": observations["identities"].get("repositories", []),
+        "capabilities": observations["identities"].get("capabilities", {}),
         "persistence": observations["persistence"].get("paths", []),
         "probes": [{"name": name, "status": value.get("status", "unknown"), "origin": "observed"} for name, value in observations.items()],
         "findings": findings,
@@ -344,6 +514,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     convert.add_argument("input")
     convert.add_argument("--output")
     convert.add_argument("--secret-file", action="append", default=[], metavar="USERNAME=PATH")
+    drift_convert = sub.add_parser("convert-drift")
+    drift_convert.add_argument("input")
+    drift_convert.add_argument("--output")
+    drift = sub.add_parser("drift")
+    drift.add_argument("input")
+    drift.add_argument("--output")
     capture_parser = sub.add_parser("capture")
     capture_parser.add_argument("--host", required=True)
     capture_parser.add_argument("--user", required=True)
@@ -360,6 +536,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             output = canonical_json(local_probe(args.probe)) + "\n"
         elif args.command == "capture":
             output = render_capture(capture(SSHTransport(args.host, args.user, args.port, args.identity_file, args.known_hosts, command=os.environ.get("OSMIUM_SSH_COMMAND", "ssh")), "gitea"))
+        elif args.command == "drift":
+            source = open(args.input, encoding="utf-8").read()
+            value = json.loads(source)
+            output = canonical_json(compare_repository_drift(value.get("declared", []), value.get("observed", []))) + "\n"
+        elif args.command == "convert-drift":
+            source = open(args.input, encoding="utf-8").read()
+            output = canonical_json(convert_drift(json.loads(source))) + "\n"
         else:
             source = sys.stdin.read() if args.input == "-" else open(args.input, encoding="utf-8").read()
             document = json.loads(source)
@@ -368,7 +551,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 secret_files = dict(item.split("=", 1) for item in args.secret_file if "=" in item)
                 output = canonical_json(convert_capture(document, secret_files)) + "\n"
-        if args.command == "convert" and args.output and args.output.endswith(".nix"):
+        if args.command in {"convert", "convert-drift"} and args.output and args.output.endswith(".nix"):
             output = render_nix(json.loads(output))
         if getattr(args, "output", None):
             with open(args.output, "w", encoding="utf-8") as handle:

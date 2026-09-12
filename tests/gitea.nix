@@ -16,6 +16,11 @@ let
       system = "x86_64-linux";
       modules = [ module evaluationBase extra ];
     }).config.system.build.toplevel)).success;
+  evaluatesConfig = extra:
+    (builtins.tryEval ((lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [ module evaluationBase extra ];
+    }).config.services.osmium.gitea.repositories)).success;
   evaluationUser = username: {
     username = username;
     email = "${username}@example.com";
@@ -43,6 +48,55 @@ assert !evaluates {
 };
 assert !evaluates {
   services.osmium.gitea.users.admin = evaluationUser "admin";
+};
+assert evaluatesConfig {
+  services.osmium.gitea.users.project = evaluationUser "project-user";
+  services.osmium.gitea.organizations.project = {
+    name = "project-org";
+    owner = "project-user";
+  };
+  services.osmium.gitea.repositories = {
+    user-repository = {
+      owner.user = "project-user";
+      name = "project-repository";
+      private = false;
+      defaultBranch = "main";
+      contentScope = "metadata-only";
+    };
+    organization-repository = {
+      owner.organization = "project-org";
+      name = "organization-repository";
+    };
+  };
+};
+assert !evaluates {
+  services.osmium.gitea.repositories.first = {
+    owner.user = "project-user";
+    name = "duplicate";
+  };
+  services.osmium.gitea.repositories.second = {
+    owner.user = "project-user";
+    name = "duplicate";
+  };
+};
+assert !evaluates {
+  services.osmium.gitea.repositories.invalid-owner = {
+    owner = { user = "project-user"; organization = "project-org"; };
+    name = "repository";
+  };
+};
+assert !evaluates {
+  services.osmium.gitea.repositories.unsafe = {
+    owner.user = "unsafe/owner";
+    name = "repository";
+  };
+};
+assert !evaluates {
+  services.osmium.gitea.repositories.unsupported = {
+    owner.user = "project-user";
+    name = "repository";
+    contentScope = "content";
+  };
 };
 
 pkgs.testers.runNixOSTest {
@@ -103,6 +157,23 @@ pkgs.testers.runNixOSTest {
         description = "Declarative project organization";
         visibility = "private";
       };
+      repositories.project = {
+        owner.user = "project-user";
+        name = "project-repository";
+        description = "Declarative project repository";
+        private = false;
+        defaultBranch = "main";
+        website = "https://example.com/project-repository";
+        issues = true;
+        wiki = false;
+        pullRequests = true;
+      };
+      repositories.organization = {
+        owner.organization = "project-org";
+        name = "organization-repository";
+        description = "Declarative organization repository";
+        private = true;
+      };
       driftDetection = {
         enable = true;
         reportFile = "/var/lib/gitea/drift-report.json";
@@ -146,8 +217,14 @@ pkgs.testers.runNixOSTest {
     vm.succeed("curl --fail --user bootstrap-admin:test-admin-password -X POST http://127.0.0.1:3000/api/v1/user/repos -H 'Content-Type: application/json' -d '{\"name\":\"persistent\"}'")
     vm.succeed("printf 'project-user-password\\n' > /run/gitea-project-user-password")
     vm.succeed("systemctl reset-failed osmium-gitea-identities.service && systemctl start osmium-gitea-identities.service")
+    vm.succeed("systemctl reset-failed osmium-gitea-repositories.service && systemctl start osmium-gitea-repositories.service")
     vm.succeed("curl --fail --user project-user:project-user-password http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == false'")
     vm.succeed("curl --fail --user project-user:project-user-password http://127.0.0.1:3000/api/v1/orgs/project-org | jq -e '.username == \"project-org\" and .visibility == \"private\"'")
+    vm.succeed("curl --fail --user project-user:project-user-password http://127.0.0.1:3000/api/v1/repos/project-user/project-repository | jq -e '.name == \"project-repository\" and .owner.login == \"project-user\" and .description == \"Declarative project repository\" and .private == false'")
+    vm.succeed("curl --fail --user bootstrap-admin:test-admin-password http://127.0.0.1:3000/api/v1/repos/project-org/organization-repository | jq -e '.name == \"organization-repository\" and .owner.login == \"project-org\" and .private == true'")
+    vm.succeed("curl --fail --user bootstrap-admin:test-admin-password -X PATCH http://127.0.0.1:3000/api/v1/repos/project-user/project-repository -H 'Content-Type: application/json' -d '{\"description\":\"externally changed\"}'")
+    vm.succeed("systemctl restart osmium-gitea-repositories.service")
+    vm.succeed("curl --fail --user project-user:project-user-password http://127.0.0.1:3000/api/v1/repos/project-user/project-repository | jq -e '.name == \"project-repository\" and .description == \"Declarative project repository\"'")
     vm.succeed("test -e /var/lib/gitea/.osmium-user-project-user")
     vm.succeed("printf 'project-user-rotated\\n' > /run/gitea-project-user-password && systemctl restart osmium-gitea-identities.service")
     vm.fail("curl --fail --user project-user:project-user-password http://127.0.0.1:3000/api/v1/user")
@@ -156,7 +233,7 @@ pkgs.testers.runNixOSTest {
     vm.succeed("printf '\\n' > /run/gitea-project-user-password")
     vm.fail("systemctl restart osmium-gitea-identities.service")
     vm.succeed("curl --fail --user project-user:project-user-rotated http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == false'")
-    vm.succeed("printf 'project-user-recovered\\n' > /run/gitea-project-user-password && systemctl restart osmium-gitea-identities.service")
+    vm.succeed("printf 'project-user-recovered\\n' > /run/gitea-project-user-password && systemctl reset-failed osmium-gitea-identities.service && systemctl restart osmium-gitea-identities.service")
     vm.succeed("curl --fail --user project-user:project-user-recovered http://127.0.0.1:3000/api/v1/user | jq -e '.is_admin == false'")
     vm.succeed("runuser -u gitea -- gitea --config /var/lib/gitea/custom/conf/app.ini admin user create --username unmanaged-user --password unmanaged-password --email unmanaged@example.com --must-change-password=false")
     vm.succeed("curl --fail --user bootstrap-admin:test-admin-password -X POST http://127.0.0.1:3000/api/v1/admin/users/bootstrap-admin/orgs -H 'Content-Type: application/json' -d '{\"username\":\"unmanaged-org\",\"description\":\"Unmanaged organization\",\"visibility\":\"private\"}'")

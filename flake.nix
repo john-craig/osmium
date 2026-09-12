@@ -170,7 +170,17 @@
              module = self.nixosModules.default;
            };
 
-           remote-gitea-capture-real = import ./tests/remote-gitea-capture-real.nix {
+            remote-gitea-capture-real = import ./tests/remote-gitea-capture-real.nix {
+             inherit pkgs microvm;
+             module = self.nixosModules.default;
+            };
+
+           gitea-repository-drift-reverse-configuration = import ./tests/gitea-repository-drift-reverse-configuration.nix {
+             inherit pkgs microvm;
+             module = self.nixosModules.default;
+           };
+
+           gitea-repository-live-capture-reverse-configuration = import ./tests/gitea-repository-live-capture-reverse-configuration.nix {
              inherit pkgs microvm;
              module = self.nixosModules.default;
            };
