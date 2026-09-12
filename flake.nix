@@ -158,14 +158,20 @@
             module = self.nixosModules.default;
           };
 
-           gitea = import ./tests/gitea.nix {
+            gitea = import ./tests/gitea.nix {
             inherit pkgs microvm;
             lib = nixpkgs.lib;
             module = self.nixosModules.default;
              healthchecks = import ./tests/healthchecks.nix { lib = nixpkgs.lib; };
-           };
+            };
 
-           remote-gitea-capture = import ./tests/remote-gitea-capture.nix {
+            gitea-credentials = import ./tests/gitea-credentials.nix {
+              inherit pkgs microvm;
+              lib = nixpkgs.lib;
+              module = self.nixosModules.default;
+            };
+
+            remote-gitea-capture = import ./tests/remote-gitea-capture.nix {
              inherit pkgs microvm;
              module = self.nixosModules.default;
            };

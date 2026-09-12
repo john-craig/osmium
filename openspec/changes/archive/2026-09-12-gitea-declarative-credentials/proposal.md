@@ -13,8 +13,9 @@ declared and reconciled safely.
 - Support user personal access tokens with declared scopes.
 - Support user SSH deploy keys, generating keypairs at runtime when needed and
   registering the public key with Gitea.
-- Support OAuth application registration and OAuth token provisioning where the
-  installed Gitea API supports the requested flow.
+- Support OAuth application registration and capability-gated OAuth token
+  provisioning. Authorization-code token issuance is explicitly unsupported
+  when the installed Gitea API requires interactive user consent.
 - Write resulting secret values to explicitly declared output files with
   restrictive ownership, permissions, and persistence behavior.
 - Persist only non-secret provisioning metadata so restarts reuse existing
@@ -50,7 +51,8 @@ declared and reconciled safely.
 - Extends Gitea observation, drift, and reverse-configuration tooling with
   credential metadata while excluding credential contents.
 - Adds runtime dependencies for SSH key generation and OAuth/API operations as
-  needed by the supported Gitea version.
+  needed by the supported Gitea version; unsupported OAuth token capabilities
+  fail closed without creating fallback credentials.
 - Adds MicroVM test fixtures and flake checks exercising a live Gitea service.
 - Existing users, organizations, repositories, and administrator credential
   behavior remain unchanged unless a new credential declaration is enabled.

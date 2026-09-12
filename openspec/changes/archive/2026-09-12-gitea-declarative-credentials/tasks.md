@@ -1,32 +1,33 @@
 ## 1. Declarative Credential Model
 
-- [ ] 1.1 Define typed `services.osmium.gitea.credentials` options for personal
-  tokens, repository deploy keys, OAuth applications, and supported OAuth tokens;
+- [x] 1.1 Define typed `services.osmium.gitea.credentials` options for personal
+  tokens, repository deploy keys, OAuth applications, and capability-gated OAuth tokens;
   verify valid declarations evaluate and invalid kinds, duplicate identities,
   missing fields, unsupported scopes/flows, and ambiguous owners fail before
   service activation
-- [ ] 1.2 Define output-file options for secret path, public metadata path,
+- [x] 1.2 Define output-file options for secret path, public metadata path,
   owner, group, mode, safe-area validation, and persistence; verify evaluated
   configuration contains only references and metadata, never secret contents
-- [ ] 1.3 Add assertions linking credentials to declared or existing users and
+- [x] 1.3 Add assertions linking credentials to declared or existing users and
   repositories and preventing organizational credentials or implicit
   administrator privileges; verify actionable evaluation failures
 
 ## 2. Runtime Provisioning And Secure Delivery
 
-- [ ] 2.1 Implement the ordered runtime reconciliation service using the
+- [x] 2.1 Implement the ordered runtime reconciliation service using the
   existing administrator credential lifecycle; verify it waits for Gitea and
   reads provisioning credentials only at runtime
-- [ ] 2.2 Implement personal-token creation, lookup, scope verification, and
+- [x] 2.2 Implement personal-token creation, lookup, scope verification, and
   one-time secret delivery; verify permitted and forbidden API operations and
   no duplicate token after reconciliation restart
-- [ ] 2.3 Implement runtime SSH keypair generation, repository deploy-key
+- [x] 2.3 Implement runtime SSH keypair generation, repository deploy-key
   registration, read/write mode handling, lookup, and private-key delivery;
   verify Git clone/push behavior matches the declared mode
-- [ ] 2.4 Implement OAuth application registration and supported non-interactive
-  token issuance with capability detection; verify client metadata, scopes,
-  unsupported flows, and one-time secret delivery against the installed Gitea
-  API
+- [ ] 2.4 Implement OAuth application registration and capability-gated
+  non-interactive token issuance; for Gitea 1.27, explicitly reject the
+  interactive authorization-code flow without mutation, and verify client
+  metadata, unsupported-flow handling, and one-time secret delivery against
+  the installed API
 - [ ] 2.5 Implement atomic protected output writes and public/private output
   separation; verify ownership, mode, persistence, temporary-file cleanup,
   process-argument safety, and absence of values from logs
@@ -70,9 +71,10 @@
 ## 5. Credential MicroVM Integration
 
 - [ ] 5.1 Add flake check `gitea-credentials` that boots the Gitea MicroVM,
-  provisions a user token, repository deploy key, OAuth application, and
-  supported OAuth token, and verifies runtime access, scopes, output files,
-  permissions, and secret omission; execute with `nix build
+  provisions a user token, repository deploy key, and OAuth application, and
+  verifies the installed version's unsupported OAuth token flow without
+  mutation; verify runtime access, scopes, output files, permissions, and
+  secret omission; execute with `nix build
   .#checks.x86_64-linux.gitea-credentials --print-build-logs`
 - [ ] 5.2 In `gitea-credentials`, restart the MicroVM and verify credential IDs,
   public fingerprints, output values, and access behavior remain unchanged with

@@ -98,6 +98,75 @@ assert !evaluates {
     contentScope = "content";
   };
 };
+assert evaluatesConfig {
+  services.osmium.gitea.users.project = evaluationUser "project-user";
+  services.osmium.gitea.credentials.token = {
+      kind = "personal-token";
+      username = "project-user";
+      scopes = [ "read:repository" ];
+      output.secretPath = "/var/lib/gitea/credentials/project-token";
+  };
+};
+assert evaluatesConfig {
+  services.osmium.gitea.users.project = evaluationUser "project-user";
+  services.osmium.gitea.repositories.project = {
+    owner.user = "project-user";
+    name = "project-repository";
+  };
+  services.osmium.gitea.credentials.deploy = {
+      kind = "deploy-key";
+      repository = { owner.user = "project-user"; name = "project-repository"; };
+      output = {
+        secretPath = "/run/gitea/project-deploy-key";
+        publicPath = "/etc/gitea/project-deploy-key.pub";
+      };
+  };
+};
+assert evaluatesConfig {
+  services.osmium.gitea.users.project = evaluationUser "project-user";
+  services.osmium.gitea.credentials.application = {
+      kind = "oauth-application";
+      applicationName = "project-client";
+      callbackUrls = [ "https://example.invalid/callback" ];
+      output.secretPath = "/var/lib/gitea/credentials/project-client";
+  };
+};
+assert evaluatesConfig {
+  services.osmium.gitea.users.project = evaluationUser "project-user";
+  services.osmium.gitea.credentials.oauth = {
+      kind = "oauth-token";
+      username = "project-user";
+      flow = "authorization-code";
+      output.secretPath = "/run/gitea/project-oauth-token";
+  };
+};
+assert !evaluates {
+  services.osmium.gitea.credentials.invalid = {
+    kind = "personal-token";
+    username = "project-user";
+    output.secretPath = "/tmp/insecure-token";
+  };
+};
+assert !evaluates {
+  services.osmium.gitea.credentials.unsupportedScope = {
+    kind = "personal-token";
+    username = "project-user";
+    scopes = [ "sudo" ];
+    output.secretPath = "/var/lib/gitea/credentials/unsupported-token";
+  };
+};
+assert !evaluates {
+  services.osmium.gitea.credentials.duplicate = {
+    kind = "personal-token";
+    username = "project-user";
+    output.secretPath = "/var/lib/gitea/credentials/duplicate-token";
+  };
+  services.osmium.gitea.credentials.duplicateOther = {
+    kind = "personal-token";
+    username = "project-user";
+    output.secretPath = "/var/lib/gitea/credentials/duplicate-token-2";
+  };
+};
 
 pkgs.testers.runNixOSTest {
   name = "osmium-gitea";

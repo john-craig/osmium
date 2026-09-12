@@ -9,8 +9,30 @@ let
   adminRotationState = "${cfg.stateDir}/.osmium-admin-rotation";
   identityDefinitions = lib.attrValues cfg.users;
   repositoryDefinitions = lib.attrValues cfg.repositories;
+  credentialDefinitions = lib.attrValues cfg.credentials;
+  supportedCredentialScopes = [
+    "read:user" "write:user"
+    "read:repository" "write:repository"
+    "read:organization" "write:organization"
+    "read:issue" "write:issue"
+    "read:notification" "write:notification"
+    "read:package" "write:package"
+    "read:misc" "write:misc"
+  ];
   identityReconciliationEnabled = cfg.users != { } || cfg.organizations != { };
   repositoryReconciliationEnabled = cfg.repositories != { };
+  credentialReconciliationEnabled = cfg.credentials != { };
+  credentialLedgerFile = "${cfg.stateDir}/.osmium-credential-ledger.json";
+  declaredCredentials = builtins.toJSON cfg.credentials;
+  credentialOutputFiles = lib.concatMap (credential:
+    [ credential.output.secretPath ] ++ lib.optional (credential.output.publicPath != null) credential.output.publicPath
+  ) credentialDefinitions;
+  persistentCredentialOutputFiles = lib.concatMap (credential:
+    if credential.output.persistent then
+      [ credential.output.secretPath ] ++ lib.optional (credential.output.publicPath != null) credential.output.publicPath
+    else
+      [ ]
+  ) credentialDefinitions;
   adminCredentialFile = cfg.admin.passwordFile;
   adminRotationPasswordFile = if cfg.admin.rotation.passwordFile == null then "/dev/null" else cfg.admin.rotation.passwordFile;
   driftHistoryFile = "${cfg.stateDir}/.osmium-drift-history";
@@ -527,6 +549,298 @@ let
           ;;
       esac
     '') (lib.attrNames cfg.repositories);
+  credentialReconciliation = ''
+    set -eu
+    trap 'echo "Gitea credential reconciliation failed at line $LINENO" >&2' ERR
+
+    api="http://127.0.0.1:${toString cfg.httpPort}/api/v1"
+    admin_username=${lib.escapeShellArg cfg.admin.username}
+    admin_password_file=${lib.escapeShellArg adminCredentialFile}
+    ledger=${lib.escapeShellArg credentialLedgerFile}
+    declarations=${lib.escapeShellArg declaredCredentials}
+
+    if [ ! -s "$admin_password_file" ]; then
+      echo "Gitea credential reconciliation administrator credential file is empty or unavailable" >&2
+      exit 1
+    fi
+    admin_password=$(cat "$admin_password_file")
+    if [ -s ${lib.escapeShellArg adminRotationPasswordFile} ]; then
+      admin_password=$(cat ${lib.escapeShellArg adminRotationPasswordFile})
+    fi
+    [ -n "$admin_password" ] || { echo "Gitea administrator credential is empty" >&2; exit 1; }
+
+    if [ ! -e "$ledger" ]; then
+      printf '{"schema_version":1,"credentials":[]}' > "$ledger"
+      chown gitea:gitea "$ledger"
+      chmod 0640 "$ledger"
+    fi
+    ${pkgs.jq}/bin/jq -e '(.schema_version == 1) and (.credentials | type == "array")' "$ledger" >/dev/null || {
+      echo "Gitea credential ledger is invalid" >&2
+      exit 1
+    }
+
+    write_secret() {
+      value=$1
+      destination=$2
+      owner=$3
+      group=$4
+      mode=$5
+      directory=$(dirname "$destination")
+      install -d -m 0750 "$directory" || { echo "Unable to create credential output directory" >&2; return 1; }
+      umask 0077
+      temporary=$(mktemp "$destination.XXXXXX") || { echo "Unable to create temporary credential output" >&2; return 1; }
+      if ! printf '%s\n' "$value" > "$temporary" || ! chown "$owner:$group" "$temporary" || ! chmod "$mode" "$temporary" || ! mv -f -- "$temporary" "$destination"; then
+        rm -f -- "$temporary"
+        echo "Unable to install credential output" >&2
+        return 1
+      fi
+      return 0
+    }
+
+    write_public() {
+      value=$1
+      destination=$2
+      owner=$3
+      group=$4
+      directory=$(dirname "$destination")
+      install -d -m 0750 "$directory" || { echo "Unable to create public credential output directory" >&2; return 1; }
+      umask 0077
+      temporary=$(mktemp "$destination.XXXXXX") || { echo "Unable to create temporary public output" >&2; return 1; }
+      if ! printf '%s\n' "$value" > "$temporary" || ! chown "$owner:$group" "$temporary" || ! chmod 0644 "$temporary" || ! mv -f -- "$temporary" "$destination"; then
+        rm -f -- "$temporary"
+        echo "Unable to install public credential output" >&2
+        return 1
+      fi
+      return 0
+    }
+
+    update_ledger() {
+      record=$1
+      ${pkgs.jq}/bin/jq --argjson record "$record" '.credentials = ([.credentials[] | select(.declaration != $record.declaration)] + [$record])' "$ledger" > "$ledger.next"
+      chown gitea:gitea "$ledger.next"
+      chmod 0640 "$ledger.next"
+      mv "$ledger.next" "$ledger"
+    }
+
+    while IFS= read -r encoded; do
+      credential=$(${pkgs.coreutils}/bin/base64 -d <<<"$encoded")
+      name=$(${pkgs.jq}/bin/jq -r '.key' <<<"$credential")
+      kind=$(${pkgs.jq}/bin/jq -r '.value.kind' <<<"$credential")
+      if [ "$kind" = "deploy-key" ]; then
+        repository_owner=$(${pkgs.jq}/bin/jq -r '.value.repository.owner.user // .value.repository.owner.organization' <<<"$credential")
+        repository_name=$(${pkgs.jq}/bin/jq -r '.value.repository.name' <<<"$credential")
+        access_mode=$(${pkgs.jq}/bin/jq -r '.value.accessMode' <<<"$credential")
+        secret_path=$(${pkgs.jq}/bin/jq -r '.value.output.secretPath' <<<"$credential")
+        public_path=$(${pkgs.jq}/bin/jq -r '.value.output.publicPath // empty' <<<"$credential")
+        output_owner=$(${pkgs.jq}/bin/jq -r '.value.output.owner' <<<"$credential")
+        output_group=$(${pkgs.jq}/bin/jq -r '.value.output.group' <<<"$credential")
+        output_mode=$(${pkgs.jq}/bin/jq -r '.value.output.mode' <<<"$credential")
+        repository_api="$api/repos/$repository_owner/$repository_name/keys"
+        existing=$(${pkgs.jq}/bin/jq -c --arg name "$name" '.credentials[] | select(.declaration == $name)' "$ledger" | head -n 1 || true)
+
+        if [ -n "$existing" ]; then
+          status=$(${pkgs.jq}/bin/jq -r '.status' <<<"$existing")
+          id=$(${pkgs.jq}/bin/jq -r '.id' <<<"$existing")
+          if [ "$status" != "success" ] || [ ! -r "$secret_path" ]; then
+            echo "Gitea deploy key '$name' has incomplete persisted state; explicit recovery is required" >&2
+            exit 1
+          fi
+          remote=$(${pkgs.curl}/bin/curl --fail --silent --show-error --user "$admin_username:$admin_password" "$repository_api")
+          ${pkgs.jq}/bin/jq -e --argjson id "$id" --arg read_only "$( [ "$access_mode" = "read-only" ] && printf true || printf false )" \
+            'any(.[]; .id == $id and .read_only == ($read_only == "true"))' <<<"$remote" >/dev/null || {
+            echo "Gitea deploy key '$name' is missing or changed remotely; refusing replacement" >&2
+            exit 1
+          }
+          continue
+        fi
+
+        temporary_directory=$(mktemp -d)
+        key_base="$temporary_directory/deploy-key"
+        if ! ${pkgs.openssh}/bin/ssh-keygen -q -t ed25519 -N "" -f "$key_base"; then
+          rm -rf -- "$temporary_directory"
+          echo "Unable to generate deploy key '$name'" >&2
+          exit 1
+        fi
+        public_key=$(cat "$key_base.pub")
+        read_only=false
+        [ "$access_mode" = "read-only" ] && read_only=true
+        payload=$(${pkgs.jq}/bin/jq -cn --arg title "$name" --arg key "$public_key" --argjson read_only "$read_only" '{title:$title,key:$key,read_only:$read_only}')
+        response=$(${pkgs.curl}/bin/curl --fail --silent --show-error --user "$admin_username:$admin_password" \
+          -X POST "$repository_api" -H 'Content-Type: application/json' --data "$payload")
+        id=$(${pkgs.jq}/bin/jq -r '.id // empty' <<<"$response")
+        fingerprint=$(${pkgs.openssh}/bin/ssh-keygen -lf "$key_base.pub" | cut -d ' ' -f 2)
+        [ -n "$id" ] && [ -n "$fingerprint" ] || {
+          rm -rf -- "$temporary_directory"
+          echo "Gitea did not return a deploy-key identity for '$name'" >&2
+          exit 1
+        }
+        pending=$(${pkgs.jq}/bin/jq -cn \
+          --arg declaration "$name" --arg repository_owner "$repository_owner" --arg repository_name "$repository_name" \
+          --arg id "$id" --arg fingerprint "$fingerprint" --arg access_mode "$access_mode" \
+          --arg secret_path "$secret_path" --arg public_path "$public_path" --arg owner "$output_owner" \
+          --arg group "$output_group" --arg mode "$output_mode" \
+          '{declaration:$declaration,kind:"deploy-key",repository:{owner:$repository_owner,name:$repository_name},id:($id|tonumber),fingerprint:$fingerprint,access_mode:$access_mode,output:{secret_path:$secret_path,public_path:$public_path,owner:$owner,group:$group,mode:$mode},status:"pending"}')
+        update_ledger "$pending"
+        private_key=$(cat "$key_base")
+        write_secret "$private_key" "$secret_path" "$output_owner" "$output_group" "$output_mode"
+        if [ -n "$public_path" ]; then
+          public=$(${pkgs.jq}/bin/jq -cn --arg id "$id" --arg title "$name" --arg key "$public_key" --arg fingerprint "$fingerprint" --arg access_mode "$access_mode" \
+            '{id:($id|tonumber),title:$title,key:$key,fingerprint:$fingerprint,access_mode:$access_mode}')
+          write_public "$public" "$public_path" "$output_owner" "$output_group"
+        fi
+        success=$(${pkgs.jq}/bin/jq --argjson record "$pending" '$record | .status = "success"' <<<"{}"); update_ledger "$success"
+         rm -rf -- "$temporary_directory"
+         continue
+       fi
+      if [ "$kind" = "oauth-application" ]; then
+        application_name=$(${pkgs.jq}/bin/jq -r '.value.applicationName' <<<"$credential")
+        callback_urls=$(${pkgs.jq}/bin/jq -c '.value.callbackUrls' <<<"$credential")
+        scopes=$(${pkgs.jq}/bin/jq -c '.value.scopes' <<<"$credential")
+        secret_path=$(${pkgs.jq}/bin/jq -r '.value.output.secretPath' <<<"$credential")
+        public_path=$(${pkgs.jq}/bin/jq -r '.value.output.publicPath // empty' <<<"$credential")
+        output_owner=$(${pkgs.jq}/bin/jq -r '.value.output.owner' <<<"$credential")
+        output_group=$(${pkgs.jq}/bin/jq -r '.value.output.group' <<<"$credential")
+        output_mode=$(${pkgs.jq}/bin/jq -r '.value.output.mode' <<<"$credential")
+        [ "$scopes" = "[]" ] || {
+          echo "Gitea OAuth application '$name' declares unsupported application scopes" >&2
+          exit 1
+        }
+        application_api="$api/user/applications/oauth2"
+        existing=$(${pkgs.jq}/bin/jq -c --arg name "$name" '.credentials[] | select(.declaration == $name)' "$ledger" | head -n 1 || true)
+        if [ -n "$existing" ]; then
+          status=$(${pkgs.jq}/bin/jq -r '.status' <<<"$existing")
+          id=$(${pkgs.jq}/bin/jq -r '.id' <<<"$existing")
+          if [ "$status" != "success" ] || [ ! -r "$secret_path" ]; then
+            echo "Gitea OAuth application '$name' has incomplete persisted state; explicit recovery is required" >&2
+            exit 1
+          fi
+          remote=$(${pkgs.curl}/bin/curl --fail --silent --show-error --user "$admin_username:$admin_password" "$application_api")
+          ${pkgs.jq}/bin/jq -e --argjson id "$id" --arg name "$application_name" --argjson redirect_uris "$callback_urls" \
+            'any(.[]; .id == $id and .name == $name and (.redirect_uris // []) == $redirect_uris)' <<<"$remote" >/dev/null || {
+            echo "Gitea OAuth application '$name' is missing or changed remotely; refusing replacement" >&2
+            exit 1
+          }
+          continue
+        fi
+        remote=$(${pkgs.curl}/bin/curl --fail --silent --show-error --user "$admin_username:$admin_password" "$application_api")
+        matches=$(${pkgs.jq}/bin/jq --arg app "$application_name" '[.[] | select(.name == $app)]' <<<"$remote")
+        [ "$(${pkgs.jq}/bin/jq 'length' <<<"$matches")" -eq 0 ] || {
+          echo "Gitea OAuth application '$name' already exists without managed ledger identity; refusing adoption" >&2
+          exit 1
+        }
+        payload=$(${pkgs.jq}/bin/jq -cn --arg app "$application_name" --argjson redirect_uris "$callback_urls" \
+          '{name:$app,redirect_uris:$redirect_uris,confidential_client:true,skip_secondary_authorization:true}')
+        response=$(${pkgs.curl}/bin/curl --fail --silent --show-error --user "$admin_username:$admin_password" \
+          -X POST "$application_api" -H 'Content-Type: application/json' --data "$payload")
+        id=$(${pkgs.jq}/bin/jq -r '.id // empty' <<<"$response")
+        client_id=$(${pkgs.jq}/bin/jq -r '.client_id // empty' <<<"$response")
+        client_secret=$(${pkgs.jq}/bin/jq -r '.client_secret // empty' <<<"$response")
+        [ -n "$id" ] && [ -n "$client_id" ] && [ -n "$client_secret" ] || {
+          echo "Gitea did not return complete OAuth application metadata for '$name'" >&2
+          exit 1
+        }
+        pending=$(${pkgs.jq}/bin/jq -cn \
+          --arg declaration "$name" --arg application_name "$application_name" --arg client_id "$client_id" --arg id "$id" \
+          --argjson callback_urls "$callback_urls" --arg secret_path "$secret_path" --arg public_path "$public_path" \
+          --arg owner "$output_owner" --arg group "$output_group" --arg mode "$output_mode" \
+          '{declaration:$declaration,kind:"oauth-application",application_name:$application_name,client_id:$client_id,id:($id|tonumber),callback_urls:$callback_urls,output:{secret_path:$secret_path,public_path:$public_path,owner:$owner,group:$group,mode:$mode},status:"pending"}')
+        update_ledger "$pending"
+        write_secret "$client_secret" "$secret_path" "$output_owner" "$output_group" "$output_mode"
+        if [ -n "$public_path" ]; then
+          public=$(${pkgs.jq}/bin/jq -cn --arg id "$id" --arg client_id "$client_id" --arg name "$application_name" --argjson callback_urls "$callback_urls" \
+            '{id:($id|tonumber),client_id:$client_id,name:$name,redirect_uris:$callback_urls}')
+          write_public "$public" "$public_path" "$output_owner" "$output_group"
+        fi
+        success=$(${pkgs.jq}/bin/jq --argjson record "$pending" '$record | .status = "success"' <<<"{}"); update_ledger "$success"
+        continue
+      fi
+      if [ "$kind" = "oauth-token" ]; then
+        echo "Gitea OAuth token '$name' uses unsupported non-interactive flow '$(${pkgs.jq}/bin/jq -r '.value.flow' <<<"$credential")'; user consent is required" >&2
+        exit 1
+      fi
+      if [ "$kind" != "personal-token" ]; then
+        echo "Gitea credential '$name' uses unsupported runtime provisioning kind '$kind'" >&2
+        exit 1
+      fi
+      username=$(${pkgs.jq}/bin/jq -r '.value.username' <<<"$credential")
+      secret_path=$(${pkgs.jq}/bin/jq -r '.value.output.secretPath' <<<"$credential")
+      public_path=$(${pkgs.jq}/bin/jq -r '.value.output.publicPath // empty' <<<"$credential")
+      output_owner=$(${pkgs.jq}/bin/jq -r '.value.output.owner' <<<"$credential")
+      output_group=$(${pkgs.jq}/bin/jq -r '.value.output.group' <<<"$credential")
+      output_mode=$(${pkgs.jq}/bin/jq -r '.value.output.mode' <<<"$credential")
+      scopes=$(${pkgs.jq}/bin/jq -c '.value.scopes' <<<"$credential")
+      existing=$(${pkgs.jq}/bin/jq -c --arg name "$name" '.credentials[] | select(.declaration == $name)' "$ledger" | head -n 1 || true)
+
+      if [ -n "$existing" ]; then
+        status=$(${pkgs.jq}/bin/jq -r '.status' <<<"$existing")
+        id=$(${pkgs.jq}/bin/jq -r '.id' <<<"$existing")
+        if [ "$status" != "success" ]; then
+          echo "Gitea credential '$name' has incomplete persisted state; explicit recovery is required" >&2
+          exit 1
+        fi
+        if [ ! -r "$secret_path" ]; then
+          echo "Gitea credential output is missing or unreadable for '$name'; explicit recovery is required" >&2
+          exit 1
+        fi
+        remote=$(${pkgs.curl}/bin/curl --fail --silent --show-error --user "$admin_username:$admin_password" \
+          "$api/users/$username/tokens?limit=50&page=1")
+        ${pkgs.jq}/bin/jq -e --argjson id "$id" --argjson scopes "$scopes" \
+          'any(.[]; .id == $id and ((.scopes // []) | sort) == ($scopes | sort))' <<<"$remote" >/dev/null || {
+          echo "Gitea credential '$name' is missing remotely; refusing to create a replacement" >&2
+          exit 1
+        }
+        continue
+      fi
+
+      echo "Provisioning new Gitea credential '$name'"
+      remote=$(${pkgs.curl}/bin/curl --fail --silent --show-error --user "$admin_username:$admin_password" \
+        "$api/users/$username/tokens?limit=50&page=1")
+      matches=$(${pkgs.jq}/bin/jq --arg name "$name" '[.[] | select(.name == $name)]' <<<"$remote")
+      if [ "$(${pkgs.jq}/bin/jq 'length' <<<"$matches")" -ne 0 ]; then
+        echo "Gitea credential '$name' already exists without managed ledger identity; refusing adoption" >&2
+        exit 1
+      fi
+
+      payload=$(${pkgs.jq}/bin/jq -cn --arg name "$name" --argjson scopes "$scopes" '{name:$name,scopes:$scopes}')
+      response=$(${pkgs.curl}/bin/curl --fail --silent --show-error --user "$admin_username:$admin_password" \
+        -X POST "$api/users/$username/tokens" -H 'Content-Type: application/json' --data "$payload")
+      id=$(${pkgs.jq}/bin/jq -r '.id // empty' <<<"$response")
+      # Gitea exposes the one-time token under the legacy JSON field "sha1".
+      token=$(${pkgs.jq}/bin/jq -r '.token // .sha1 // empty' <<<"$response")
+      [ -n "$id" ] && [ -n "$token" ] || {
+        response_keys=$(${pkgs.jq}/bin/jq -c 'keys' <<<"$response")
+        echo "Gitea did not return a one-time token for '$name' (response fields: $response_keys)" >&2
+        exit 1
+      }
+      ${pkgs.jq}/bin/jq -e --argjson scopes "$scopes" '((.scopes // []) | sort) == ($scopes | sort)' <<<"$response" >/dev/null || {
+        echo "Gitea returned scopes that do not match declaration '$name'" >&2
+        exit 1
+      }
+
+      pending=$(${pkgs.jq}/bin/jq -cn \
+        --arg declaration "$name" --arg kind "$kind" --arg username "$username" --arg id "$id" \
+        --argjson scopes "$scopes" --arg secret_path "$secret_path" --arg public_path "$public_path" \
+        --arg owner "$output_owner" --arg group "$output_group" --arg mode "$output_mode" \
+        '{declaration:$declaration,kind:$kind,username:$username,id:($id|tonumber),scopes:$scopes,output:{secret_path:$secret_path,public_path:$public_path,owner:$owner,group:$group,mode:$mode},status:"pending"}')
+      echo "Persisting pending metadata for Gitea credential '$name'"
+      update_ledger "$pending"
+      echo "Writing protected output for Gitea credential '$name'"
+      set +e
+      write_secret "$token" "$secret_path" "$output_owner" "$output_group" "$output_mode"
+      write_status=$?
+      set -e
+      [ "$write_status" -eq 0 ] || exit "$write_status"
+      echo "Protected output complete for Gitea credential '$name'"
+      if [ -n "$public_path" ]; then
+        echo "Writing public output for Gitea credential '$name'"
+        public=$(${pkgs.jq}/bin/jq -c '{id,name,scopes,token_last_eight}' <<<"$response")
+        write_public "$public" "$public_path" "$output_owner" "$output_group"
+        echo "Public output complete for Gitea credential '$name'"
+      fi
+      echo "Persisting successful metadata for Gitea credential '$name'"
+      success=$(${pkgs.jq}/bin/jq --argjson record "$pending" '$record | .status = "success"' <<<"{}"); update_ledger "$success"
+    done < <(${pkgs.jq}/bin/jq -r 'to_entries[] | @base64' <<<"$declarations")
+  '';
 in
 {
   options.services.osmium.gitea = {
@@ -690,6 +1004,114 @@ in
       }));
       default = { };
       description = "Declarative Gitea repositories keyed by stable local declaration names.";
+    };
+
+    credentials = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.submodule ({ ... }: {
+        options = {
+          kind = lib.mkOption {
+            type = lib.types.enum [ "personal-token" "deploy-key" "oauth-application" "oauth-token" ];
+            description = "Kind of runtime-generated Gitea credential.";
+          };
+          username = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "User login owning a personal token or OAuth token.";
+          };
+          repository = lib.mkOption {
+            type = lib.types.nullOr (lib.types.submodule ({ ... }: {
+              options = {
+                owner = lib.mkOption {
+                  type = lib.types.submodule ({ ... }: {
+                    options = {
+                      user = lib.mkOption {
+                        type = lib.types.nullOr lib.types.str;
+                        default = null;
+                        description = "User owning the repository.";
+                      };
+                      organization = lib.mkOption {
+                        type = lib.types.nullOr lib.types.str;
+                        default = null;
+                        description = "Organization owning the repository.";
+                      };
+                    };
+                  });
+                  description = "Exactly one user or organization repository owner.";
+                };
+                name = lib.mkOption {
+                  type = lib.types.str;
+                  description = "Repository name receiving the deploy key.";
+                };
+              };
+            }));
+            default = null;
+            description = "Repository receiving a deploy key.";
+          };
+          scopes = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ ];
+            description = "Gitea scopes requested by a token or OAuth application.";
+          };
+          accessMode = lib.mkOption {
+            type = lib.types.enum [ "read-only" "read-write" ];
+            default = "read-only";
+            description = "Repository deploy-key access mode.";
+          };
+          applicationName = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "OAuth application name.";
+          };
+          callbackUrls = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ ];
+            description = "OAuth application callback URLs.";
+          };
+          flow = lib.mkOption {
+            type = lib.types.nullOr (lib.types.enum [ "authorization-code" ]);
+            default = null;
+            description = "Supported non-interactive OAuth token flow.";
+          };
+          output = lib.mkOption {
+            type = lib.types.submodule ({ ... }: {
+              options = {
+                secretPath = lib.mkOption {
+                  type = lib.types.str;
+                  description = "Protected path receiving generated secret material.";
+                };
+                publicPath = lib.mkOption {
+                  type = lib.types.nullOr lib.types.str;
+                  default = null;
+                  description = "Optional path receiving public credential metadata.";
+                };
+                owner = lib.mkOption {
+                  type = lib.types.str;
+                  default = "gitea";
+                  description = "Owner of generated credential output files.";
+                };
+                group = lib.mkOption {
+                  type = lib.types.str;
+                  default = "gitea";
+                  description = "Group of generated credential output files.";
+                };
+                mode = lib.mkOption {
+                  type = lib.types.str;
+                  default = "0400";
+                  description = "File mode for generated secret output.";
+                };
+                persistent = lib.mkOption {
+                  type = lib.types.bool;
+                  default = true;
+                  description = "Whether generated output is retained by impermanence.";
+                };
+              };
+            });
+            description = "Protected output destinations for generated credential material.";
+          };
+        };
+      }));
+      default = { };
+      description = "Declarative runtime-generated Gitea credentials keyed by stable local names.";
     };
 
     driftDetection = {
@@ -863,6 +1285,77 @@ in
           lib.length (lib.unique identities) == lib.length identities;
         message = "Declarative Gitea repository owner and name identities must be unique.";
       }
+      {
+        assertion = lib.all (credential:
+          (credential.username == null || builtins.match "[A-Za-z0-9._-]+" credential.username != null)
+          && (credential.repository == null || (
+            (credential.repository.owner.user == null) != (credential.repository.owner.organization == null)
+            && builtins.match "[A-Za-z0-9._-]+" (if credential.repository.owner.user != null then credential.repository.owner.user else credential.repository.owner.organization) != null
+            && builtins.match "[A-Za-z0-9._-]+" credential.repository.name != null
+          ))
+        ) credentialDefinitions;
+        message = "Gitea credential owners, repository names, and usernames may contain only letters, numbers, dots, underscores, and hyphens.";
+      }
+      {
+        assertion = lib.all (credential:
+          let
+            hasUser = credential.username != null;
+            hasRepository = credential.repository != null;
+            hasApplication = credential.applicationName != null;
+          in
+          (credential.kind == "personal-token" && hasUser && !hasRepository && !hasApplication)
+          || (credential.kind == "deploy-key" && hasRepository && !hasUser && !hasApplication)
+          || (credential.kind == "oauth-application" && hasApplication && !hasRepository)
+          || (credential.kind == "oauth-token" && hasUser && credential.flow != null && !hasRepository && !hasApplication)
+        ) credentialDefinitions;
+        message = "Each Gitea credential must provide exactly the fields required by its kind; organizational credentials are unsupported.";
+      }
+      {
+        assertion = lib.length (lib.unique (map (credential:
+          if credential.kind == "deploy-key" then
+            "deploy-key:${if credential.repository.owner.user != null then "user" else "organization"}:${if credential.repository.owner.user != null then credential.repository.owner.user else credential.repository.owner.organization}:${credential.repository.name}"
+          else if credential.kind == "oauth-application" then
+            "oauth-application:${credential.applicationName}"
+          else
+            "${credential.kind}:${credential.username}"
+        ) credentialDefinitions)) == lib.length credentialDefinitions;
+        message = "Gitea credential resource identities must be unique.";
+      }
+      {
+        assertion = lib.all (credential:
+          lib.all (scope: lib.elem scope supportedCredentialScopes) credential.scopes
+        ) credentialDefinitions;
+        message = "Gitea credential scopes must be supported non-administrator scopes.";
+      }
+      {
+        assertion = lib.all (credential:
+          credential.username == null || credential.username != cfg.admin.username
+        ) credentialDefinitions;
+        message = "Gitea credentials must not target the administrator account.";
+      }
+      {
+        assertion = lib.all (credential:
+          let
+            paths = [ credential.output.secretPath ] ++ lib.optional (credential.output.publicPath != null) credential.output.publicPath;
+          in
+          lib.all (path:
+            lib.any (prefix: lib.hasPrefix prefix path) [ "/var/lib/gitea/" "/etc/gitea/" "/run/gitea/" ]
+          ) paths
+        ) credentialDefinitions;
+        message = "Gitea credential output paths must be below /var/lib/gitea, /etc/gitea, or /run/gitea.";
+      }
+      {
+        assertion = lib.all (credential:
+          builtins.match "0[0-7]{3}" credential.output.mode != null
+          && lib.hasPrefix "0" credential.output.mode
+          && builtins.match "0[0-7][0-7][0-7]" credential.output.mode != null
+        ) credentialDefinitions;
+        message = "Gitea credential output modes must be four-digit restrictive octal modes.";
+      }
+      {
+        assertion = !credentialReconciliationEnabled || (cfg.admin.enable && adminCredentialFile != null);
+        message = "Declarative Gitea credentials require administrator bootstrap and an administrator credential file.";
+      }
     ];
 
     users.users.gitea = {
@@ -908,7 +1401,6 @@ in
         mode = "0750";
       }
     ];
-
     systemd.services.osmium-gitea-admin-bootstrap = lib.mkIf cfg.admin.enable {
       description = "Bootstrap the Osmium Gitea administrator";
       wantedBy = [ "multi-user.target" ];
@@ -1084,6 +1576,31 @@ in
     system.activationScripts.osmium-gitea-repositories = lib.mkIf repositoryReconciliationEnabled {
       text = ''
         ${pkgs.systemd}/bin/systemctl restart osmium-gitea-repositories.service || true
+      '';
+    };
+
+    systemd.services.osmium-gitea-credentials = lib.mkIf credentialReconciliationEnabled {
+      description = "Reconcile declarative Osmium Gitea credentials";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "gitea.service" "osmium-gitea-admin-bootstrap.service" ]
+        ++ lib.optional cfg.admin.rotation.enable "osmium-gitea-admin-rotation.service"
+        ++ lib.optional identityReconciliationEnabled "osmium-gitea-identities.service"
+        ++ lib.optional repositoryReconciliationEnabled "osmium-gitea-repositories.service";
+      requires = [ "gitea.service" "osmium-gitea-admin-bootstrap.service" ]
+        ++ lib.optional identityReconciliationEnabled "osmium-gitea-identities.service"
+        ++ lib.optional repositoryReconciliationEnabled "osmium-gitea-repositories.service";
+      serviceConfig = {
+        Type = "oneshot";
+        User = "root";
+        Group = "root";
+        UMask = "0077";
+        ExecStart = pkgs.writeShellScript "osmium-gitea-credentials" credentialReconciliation;
+      };
+    };
+
+    system.activationScripts.osmium-gitea-credentials = lib.mkIf credentialReconciliationEnabled {
+      text = ''
+        ${pkgs.systemd}/bin/systemctl restart osmium-gitea-credentials.service || true
       '';
     };
 

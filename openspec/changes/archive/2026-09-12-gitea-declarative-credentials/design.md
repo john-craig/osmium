@@ -73,11 +73,13 @@ identified declaration.
 
 OAuth application registration and OAuth token issuance will use separate typed
 paths. Application creation stores client ID and secret according to the output
-contract. Token creation is supported only for an explicitly implemented Gitea
-authorization flow with declared user and scopes; an unavailable or
-interactive-only flow is an unsupported state, not a reason to weaken
-validation. The design will capability-detect the installed Gitea API and
-record the API/version facts used.
+contract. Token creation is supported only for an explicitly implemented,
+non-interactive Gitea authorization flow with declared user and scopes. The
+authorization-code flow exposed by Gitea 1.27 requires interactive user
+consent, so it is an explicit unsupported capability: reconciliation reports
+the unsupported flow and performs no application or token mutation. Future
+non-interactive capabilities must be detected before mutation and record the
+API/version facts used.
 
 ### Define output files as a security boundary
 
@@ -138,8 +140,9 @@ conversion input.
   unrelated access → require ledger identity and compatible resource metadata,
   otherwise report a conflict and leave it untouched.
 - [Risk] OAuth token issuance may require user consent or browser interaction →
-  support only a documented non-interactive flow and classify other cases as
-  unsupported rather than embedding credentials or automation shortcuts.
+  support only a documented non-interactive flow and classify Gitea 1.27's
+  authorization-code flow as unsupported rather than embedding credentials or
+  automation shortcuts.
 - [Risk] Reverse configuration can imply that a credential is reproducible →
   emit no secret, require an operator output path, and mark candidates
   incomplete until reviewed.

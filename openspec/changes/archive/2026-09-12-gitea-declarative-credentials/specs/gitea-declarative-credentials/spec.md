@@ -12,8 +12,9 @@ local names. Each declaration SHALL identify exactly one supported credential
 kind, its Gitea owner or resource, requested scopes or permissions where
 applicable, and an output file for the resulting secret material. The initial
 credential kinds SHALL be user personal access tokens, user SSH deploy keys,
-OAuth applications, and supported OAuth tokens. Organizational credentials are
-outside the initial scope.
+OAuth applications, and capability-gated OAuth tokens. Organizational credentials are
+outside the initial scope. An OAuth token declaration MUST fail closed when the
+installed Gitea version exposes only an interactive authorization-code flow.
 
 #### Scenario: Personal token is declared
 
@@ -36,6 +37,13 @@ outside the initial scope.
 - **THEN** reconciliation provisions one application and writes its generated
   client secret, together with non-secret client metadata, to the declared
   output locations
+
+#### Scenario: OAuth token flow is unsupported by the installed Gitea version
+
+- **WHEN** an OAuth token declaration requests authorization-code issuance and
+  the installed Gitea API requires interactive user consent
+- **THEN** reconciliation reports an unsupported-flow error and creates neither
+  an OAuth application nor an OAuth token
 
 #### Scenario: Unsupported or ambiguous declaration is present
 
