@@ -26,7 +26,69 @@ to Osmium paths. The migration is repeatable and does not copy secret contents
 into logs or generated configuration.
 
 The examples are exposed as `nixosConfigurations.demo-guest`,
-`nixosConfigurations.gitea-guest`, and `nixosConfigurations.demo-host`.
+`nixosConfigurations.gitea-guest`, `nixosConfigurations.fdroid-guest`, and
+`nixosConfigurations.demo-host`.
+
+## F-Droid Repository
+
+The F-Droid repository service is disabled by default and publishes one
+read-only repository from a persistent guest directory. It accepts prebuilt,
+signed APKs and generates F-Droid metadata and signed indexes at startup with
+the pinned `fdroidserver` package:
+
+```nix
+services.osmium.fdroidRepository = {
+  enable = true;
+  repositoryId = "example";
+  name = "Example Repository";
+  description = "Reviewed applications";
+  baseUrl = "https://repo.example.invalid/repo";
+  guestPort = 8080;
+  hostPort = 38080;
+  signing = {
+    keystoreFile = config.sops.secrets.fdroid-keystore.path;
+    passwordFile = config.sops.secrets.fdroid-password.path;
+    keyAlias = "fdroid";
+  };
+  artifacts.example = {
+    packageName = "org.example.app";
+    versionCode = 1;
+    versionName = "1.0";
+    path = ./org.example.app.apk;
+    sha256 = "<64 hexadecimal characters>";
+  };
+};
+```
+
+`baseUrl` is the client-facing URL ending in `/repo`; the guest HTTP server
+serves that root on `guestPort`, and a MicroVM host forwards `hostPort` to it.
+The service fails closed when the keystore or password file is missing or
+unreadable. Secret contents are read only at runtime and are never placed in
+the Nix store, unit arguments, generated ledger, logs, or reverse-configuration
+output.
+
+The complete repository tree, generation ledger, APKs, indexes, and readiness
+marker persist below `stateDir` (default `/var/lib/fdroid-repository`). Startup
+generation is idempotent once `.ready` exists. Removing an artifact declaration
+does not delete persisted files; destructive cleanup remains an operator
+action. A repository is ready only after generation succeeds and `.ready` is
+present.
+
+Reverse configuration is review-only. Run `observe` or `drift`, then `convert`
+and inspect the deterministic, provenance-bearing candidate. `validate` rejects
+incomplete or ambiguous candidates, while `reconcile` only projects a reviewed
+candidate and never changes the running repository or source files:
+
+```sh
+osmium-fdroid-repository drift --output /tmp/fdroid-drift.json
+osmium-fdroid-repository convert --input /tmp/fdroid-drift.json --output /tmp/fdroid-candidate.json
+osmium-fdroid-repository validate --input /tmp/fdroid-candidate.json
+osmium-fdroid-repository reconcile --input /tmp/fdroid-candidate.json --output /tmp/fdroid-reconciliation.json
+```
+
+Missing signing references, missing artifacts, checksum conflicts, and
+unsupported state remain explicit findings and cannot be activated. Capture
+does not read private keys or passwords.
 
 ## Gitea
 

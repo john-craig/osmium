@@ -70,6 +70,21 @@
           };
         }
       ];
+
+      fdroidGuestModules = [
+        microvm.nixosModules.microvm
+        self.nixosModules.default
+        {
+          networking.hostName = "osmium-fdroid";
+          system.stateVersion = "25.05";
+          microvm = {
+            hypervisor = "qemu";
+            vcpu = 1;
+            mem = 512;
+            interfaces = [ { type = "user"; id = "fdroid"; mac = "02:00:00:00:00:0b"; } ];
+          };
+        }
+      ];
     in
     {
       nixosModules.default = {
@@ -120,6 +135,11 @@
       nixosConfigurations.gitea-guest = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
         modules = giteaGuestModules;
+      };
+
+      nixosConfigurations.fdroid-guest = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = fdroidGuestModules;
       };
 
       checks = forAllSystems (system:
@@ -186,10 +206,26 @@
              module = self.nixosModules.default;
            };
 
-           gitea-repository-live-capture-reverse-configuration = import ./tests/gitea-repository-live-capture-reverse-configuration.nix {
+            gitea-repository-live-capture-reverse-configuration = import ./tests/gitea-repository-live-capture-reverse-configuration.nix {
              inherit pkgs microvm;
              module = self.nixosModules.default;
-           };
+            };
+
+            fdroid-repository = import ./tests/fdroid-repository.nix {
+              inherit pkgs microvm;
+              lib = nixpkgs.lib;
+              module = self.nixosModules.default;
+            };
+
+            fdroid-repository-drift-reverse-configuration = import ./tests/fdroid-repository-drift-reverse-configuration.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+            };
+
+            fdroid-repository-live-capture-reverse-configuration = import ./tests/fdroid-repository-live-capture-reverse-configuration.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+            };
 
           osmium-rebrand-fresh = rebrand.osmium-rebrand-fresh;
           osmium-rebrand-migration = rebrand.osmium-rebrand-migration;
