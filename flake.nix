@@ -222,12 +222,18 @@
               module = self.nixosModules.default;
             };
 
-            fdroid-repository-live-capture-reverse-configuration = import ./tests/fdroid-repository-live-capture-reverse-configuration.nix {
-              inherit pkgs microvm;
-              module = self.nixosModules.default;
-            };
+             fdroid-repository-live-capture-reverse-configuration = import ./tests/fdroid-repository-live-capture-reverse-configuration.nix {
+               inherit pkgs microvm;
+               module = self.nixosModules.default;
+             };
 
-          osmium-rebrand-fresh = rebrand.osmium-rebrand-fresh;
+             gitea-fdroid-action-publish = import ./tests/gitea-fdroid-action-publish.nix {
+               inherit pkgs microvm;
+               lib = nixpkgs.lib;
+               module = self.nixosModules.default;
+             };
+
+           osmium-rebrand-fresh = rebrand.osmium-rebrand-fresh;
           osmium-rebrand-migration = rebrand.osmium-rebrand-migration;
         });
 
