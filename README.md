@@ -9,6 +9,61 @@ The project contains a small native NixOS HTTP service, Gitea integration, and
 filesystem snapshot workflows. They verify that declared state survives a
 reboot while the guest root filesystem is recreated.
 
+## OpenCode Server
+
+The OpenCode server is disabled by default and runs as a locked, lingering
+`opencode` user through Home Manager. Credentials are supplied at runtime in a
+host-prepared directory; the MicroVM mounts that directory read-only and keeps
+it outside persistence. A complete declaration is:
+
+```nix
+services.osmium.opencodeServer = {
+  enable = true;
+  listenAddress = "0.0.0.0";
+  hostPort = 44096;
+  credentials.hostDirectory = "/run/secrets/opencode";
+  workspaces.project = {
+    hostPath = "/srv/opencode/project";
+    guestPath = "/var/lib/opencode/workspace/project";
+    readOnly = false;
+  };
+};
+```
+
+The host directory must be private (normally `0700`) and contain non-empty
+`server.env` with `OPENCODE_SERVER_PASSWORD` plus valid provider `auth.json`.
+Materialize `/run/secrets/opencode/{server.env,auth.json}` from `sops-nix` or
+another runtime secret manager in a host activation service, then declare
+`credentials.hostDirectory` as above. Do not use Nix `text` for secret values.
+Provider authentication is bootstrapped atomically into persistent OpenCode
+state and valid changed files rotate on the next reconciliation. Invalid
+replacements leave the last valid provider auth in place and fail readiness.
+The HTTP password is reloaded by restarting the user service; old credentials
+stop working after a valid rotation.
+
+The primary MicroVM check exercises the running OpenCode HTTP API: it creates a
+session, sends a prompt through a deterministic local OpenAI-compatible mock
+provider, and verifies the expected response. It does not invoke the interactive
+OpenCode CLI. The tested surface also covers provider-auth bootstrap, validation,
+persistence, and rotation.
+
+Reverse configuration is review-only:
+
+```sh
+osmium-opencode-observe > /tmp/opencode-capture.json
+osmium-opencode-drift > /tmp/opencode-drift.json
+```
+
+Outputs omit secret bytes and mark host-only source paths unresolved and
+incomplete. Review and supply those inputs before activation. Run the three
+booting checks with:
+
+```sh
+nix build .#checks.x86_64-linux.opencode-server --print-build-logs
+nix build .#checks.x86_64-linux.opencode-server-drift-reverse-configuration --print-build-logs
+nix build .#checks.x86_64-linux.opencode-server-live-capture-reverse-configuration --print-build-logs
+```
+
 ## Design
 
 - Services are native NixOS modules whenever possible.

@@ -4,6 +4,9 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
 
+    home-manager.url = "github:nix-community/home-manager";
+    home-manager.inputs.nixpkgs.follows = "nixpkgs";
+
     impermanence.url = "github:nix-community/impermanence";
     impermanence.inputs.nixpkgs.follows = "nixpkgs";
 
@@ -14,7 +17,7 @@
     sops-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, impermanence, microvm, sops-nix }:
+  outputs = { self, nixpkgs, home-manager, impermanence, microvm, sops-nix }:
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
@@ -88,9 +91,10 @@
     in
     {
       nixosModules.default = {
-        imports = [
-          impermanence.nixosModules.impermanence
-          sops-nix.nixosModules.sops
+          imports = [
+            impermanence.nixosModules.impermanence
+            home-manager.nixosModules.home-manager
+            sops-nix.nixosModules.sops
           ./modules
         ];
       };
@@ -222,10 +226,28 @@
               module = self.nixosModules.default;
             };
 
-             fdroid-repository-live-capture-reverse-configuration = import ./tests/fdroid-repository-live-capture-reverse-configuration.nix {
+           fdroid-repository-live-capture-reverse-configuration = import ./tests/fdroid-repository-live-capture-reverse-configuration.nix {
                inherit pkgs microvm;
                module = self.nixosModules.default;
-             };
+              };
+
+              opencode-server = import ./tests/opencode-server.nix {
+                inherit pkgs microvm;
+                lib = nixpkgs.lib;
+                module = self.nixosModules.default;
+              };
+
+              opencode-server-drift-reverse-configuration = import ./tests/opencode-server-drift-reverse-configuration.nix {
+                inherit pkgs microvm;
+                lib = nixpkgs.lib;
+                module = self.nixosModules.default;
+              };
+
+              opencode-server-live-capture-reverse-configuration = import ./tests/opencode-server-live-capture-reverse-configuration.nix {
+                inherit pkgs microvm;
+                lib = nixpkgs.lib;
+                module = self.nixosModules.default;
+              };
 
              gitea-fdroid-action-publish = import ./tests/gitea-fdroid-action-publish.nix {
                inherit pkgs microvm;
