@@ -7,6 +7,9 @@
     home-manager.url = "github:nix-community/home-manager";
     home-manager.inputs.nixpkgs.follows = "nixpkgs";
 
+    opencode-nix.url = "github:albertov/opencode-nix";
+    opencode-nix.inputs.nixpkgs.follows = "nixpkgs";
+
     impermanence.url = "github:nix-community/impermanence";
     impermanence.inputs.nixpkgs.follows = "nixpkgs";
 
@@ -17,7 +20,7 @@
     sops-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, home-manager, impermanence, microvm, sops-nix }:
+  outputs = { self, nixpkgs, home-manager, opencode-nix, impermanence, microvm, sops-nix }:
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
@@ -95,6 +98,7 @@
             impermanence.nixosModules.impermanence
             home-manager.nixosModules.home-manager
             sops-nix.nixosModules.sops
+            { nixpkgs.overlays = nixpkgs.lib.mkDefault [ opencode-nix.overlays.default ]; }
           ./modules
         ];
       };
@@ -233,18 +237,49 @@
 
               opencode-server = import ./tests/opencode-server.nix {
                 inherit pkgs microvm;
+                opencodeNix = opencode-nix;
                 lib = nixpkgs.lib;
                 module = self.nixosModules.default;
               };
 
               opencode-server-drift-reverse-configuration = import ./tests/opencode-server-drift-reverse-configuration.nix {
                 inherit pkgs microvm;
+                opencodeNix = opencode-nix;
                 lib = nixpkgs.lib;
                 module = self.nixosModules.default;
               };
 
               opencode-server-live-capture-reverse-configuration = import ./tests/opencode-server-live-capture-reverse-configuration.nix {
                 inherit pkgs microvm;
+                opencodeNix = opencode-nix;
+                lib = nixpkgs.lib;
+                module = self.nixosModules.default;
+              };
+
+               opencode-server-profiles = import ./tests/opencode-server-profiles.nix {
+                inherit pkgs microvm;
+                opencodeNix = opencode-nix;
+                lib = nixpkgs.lib;
+                module = self.nixosModules.default;
+               };
+
+               opencode-server-profiles-evaluation = import ./tests/opencode-server-profiles-evaluation.nix {
+                 inherit pkgs microvm;
+                 opencodeNix = opencode-nix;
+                 lib = nixpkgs.lib;
+                 module = self.nixosModules.default;
+               };
+
+              opencode-server-profiles-drift-reverse-configuration = import ./tests/opencode-server-profiles-drift-reverse-configuration.nix {
+                inherit pkgs microvm;
+                opencodeNix = opencode-nix;
+                lib = nixpkgs.lib;
+                module = self.nixosModules.default;
+              };
+
+              opencode-server-profiles-live-capture-reverse-configuration = import ./tests/opencode-server-profiles-live-capture-reverse-configuration.nix {
+                inherit pkgs microvm;
+                opencodeNix = opencode-nix;
                 lib = nixpkgs.lib;
                 module = self.nixosModules.default;
               };

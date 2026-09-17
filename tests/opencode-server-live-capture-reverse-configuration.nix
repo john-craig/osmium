@@ -1,10 +1,10 @@
-{ pkgs, lib, module, microvm }:
+{ pkgs, lib, module, microvm, opencodeNix }:
 
 pkgs.testers.runNixOSTest {
   name = "osmium-opencode-server-live-capture-reverse-configuration";
   nodes.vm = {
     imports = [ microvm.nixosModules.microvm module ];
-    nixpkgs.overlays = lib.mkForce [ ];
+    nixpkgs.overlays = lib.mkForce [ opencodeNix.overlays.default ];
     microvm = { hypervisor = "qemu"; interfaces = [ { type = "user"; id = "opencap"; mac = "02:00:00:00:00:13"; } ]; shares = lib.mkForce [ ]; };
     system.stateVersion = "25.05";
     nix.settings.trusted-users = [ "root" "opencode" ];

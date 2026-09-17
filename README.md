@@ -41,6 +41,73 @@ replacements leave the last valid provider auth in place and fail readiness.
 The HTTP password is reloaded by restarting the user service; old credentials
 stop working after a valid rotation.
 
+Profiles, skills, and MCP servers can be declared together. Profile rules are
+ordered, skill sources are immutable, and MCP credentials are resolved only at
+runtime:
+
+```nix
+services.osmium.opencodeServer = {
+  enable = true;
+  skills.facts.path = ./skills/facts;
+  mcpServers.facts = {
+    type = "local";
+     command = [ "/usr/local/libexec/facts-mcp" ];
+    environment.MCP_TOKEN = "{env:MCP_TOKEN}";
+  };
+  mcpServers.remote = {
+    type = "remote";
+    url = "https://mcp.example.invalid/endpoint";
+    headers.Authorization = "{env:MCP_AUTHORIZATION}";
+  };
+  profiles.facts = {
+    model = "anthropic/claude-sonnet";
+    rules = [ "Use verified facts." "Cite the source of each result." ];
+    ruleFiles = [ ./rules/facts.md ];
+    skills = [ "facts" ];
+    mcpServers = [ "facts" ];
+    permissions.read = "allow";
+  };
+};
+```
+
+Create a session first, then select the profile on the message request. A later
+message may explicitly switch to another enabled profile:
+
+```sh
+curl --user opencode:PASSWORD -X POST http://127.0.0.1:4096/session -d '{}' \
+  | jq -r .id > /tmp/session
+curl --user opencode:PASSWORD -H 'Content-Type: application/json' \
+  -X POST "http://127.0.0.1:4096/session/$(cat /tmp/session)/message" \
+  -d '{"agent":"facts","parts":[{"type":"text","text":"Summarize the facts"}]}'
+```
+
+Changing `MCP_TOKEN` in the mounted environment file restarts the service and
+the next MCP call consumes the replacement. Capture and drift commands include
+profile state, omit secret values, and remain review-only. Profile-specific
+checks are:
+
+```sh
+nix build .#checks.x86_64-linux.opencode-server-profiles --print-build-logs
+nix build .#checks.x86_64-linux.opencode-server-profiles-drift-reverse-configuration --print-build-logs
+nix build .#checks.x86_64-linux.opencode-server-profiles-live-capture-reverse-configuration --print-build-logs
+```
+
+To switch an existing session, send the next message with another enabled
+profile name. The server rejects unknown, disabled, or removed names; it never
+silently maps them to a different profile:
+
+```sh
+curl --user opencode:PASSWORD -H 'Content-Type: application/json' \
+  -X POST "http://127.0.0.1:4096/session/$(cat /tmp/session)/message" \
+  -d '{"agent":"audit","parts":[{"type":"text","text":"Review the result"}]}'
+```
+
+For rollback, restore the previous `server.env` and provider `auth.json`
+contents in the runtime secret directory, then run
+`systemctl start osmium-opencode-reconcile.service`. The service restarts only
+when the file digest changes; invalid replacements fail closed and preserve the
+last valid provider credentials.
+
 The primary MicroVM check exercises the running OpenCode HTTP API: it creates a
 session, sends a prompt through a deterministic local OpenAI-compatible mock
 provider, and verifies the expected response. It does not invoke the interactive

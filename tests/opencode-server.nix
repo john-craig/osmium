@@ -1,4 +1,4 @@
-{ pkgs, lib, module, microvm }:
+{ pkgs, lib, module, microvm, opencodeNix }:
 
 let
   mockProvider = pkgs.writeText "osmium-opencode-mock-provider.py" ''
@@ -97,7 +97,7 @@ pkgs.testers.runNixOSTest {
   name = "osmium-opencode-server";
   nodes.vm = {
     imports = [ microvm.nixosModules.microvm module ];
-    nixpkgs.overlays = lib.mkForce [ ];
+    nixpkgs.overlays = lib.mkForce [ opencodeNix.overlays.default ];
     microvm = {
       hypervisor = "qemu";
       interfaces = [ { type = "user"; id = "opencode-test"; mac = "02:00:00:00:00:11"; } ];
