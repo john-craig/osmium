@@ -72,6 +72,45 @@ assert !evaluates {
     permissions."facts_*" = "allow";
   };
 };
+assert evaluates {
+  services.osmium.opencodeServer.supportProfile = {
+    enable = true;
+    model = "local/mock";
+    toolProfile = "essential";
+  };
+};
+assert evaluates {
+  services.osmium.opencodeServer.supportProfile.model = "";
+};
+assert !evaluates {
+  services.osmium.opencodeServer.supportProfile = {
+    enable = true;
+    model = "local/mock";
+    name = "bad/name";
+  };
+};
+assert !evaluates {
+  services.osmium.opencodeServer.supportProfile = {
+    enable = true;
+    model = "local/mock";
+    toolProfile = "invalid";
+  };
+};
+assert !evaluates {
+  services.osmium.opencodeServer.profiles.osmium-support.model = "local/mock";
+  services.osmium.opencodeServer.supportProfile = { enable = true; model = "local/mock"; };
+};
+assert !evaluates {
+  services.osmium.opencodeServer.mcpServers.opencode-support = { type = "local"; command = [ "true" ]; };
+  services.osmium.opencodeServer.supportProfile = { enable = true; model = "local/mock"; };
+};
+assert !evaluates {
+  services.osmium.opencodeServer.profiles.other = {
+    model = "local/mock";
+    permissions."opencode-support_*" = "allow";
+  };
+  services.osmium.opencodeServer.supportProfile = { enable = true; model = "local/mock"; };
+};
 pkgs.runCommand "opencode-server-profiles-evaluation" { } ''
   touch $out
 ''

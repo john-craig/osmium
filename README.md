@@ -108,11 +108,43 @@ contents in the runtime secret directory, then run
 when the file digest changes; invalid replacements fail closed and preserve the
 last valid provider credentials.
 
-The primary MicroVM check exercises the running OpenCode HTTP API: it creates a
-session, sends a prompt through a deterministic local OpenAI-compatible mock
-provider, and verifies the expected response. It does not invoke the interactive
-OpenCode CLI. The tested surface also covers provider-auth bootstrap, validation,
-persistence, and rotation.
+### Same-Server Support Profile
+
+Enable the bounded support coordinator explicitly and provide its model:
+
+```nix
+services.osmium.opencodeServer.supportProfile = {
+  enable = true;
+  model = "local/mock";
+  toolProfile = "full"; # or "essential"
+};
+```
+
+This generates the `osmium-support` profile and local `opencode-support` MCP entry. It
+connects only to the guest listener, consumes the mounted password through
+`{env:OPENCODE_SERVER_PASSWORD}`, and sets `OPENCODE_AUTO_SERVE=false`. The
+support profile can inspect, create, and message same-server sessions, including
+sessions created by `opencode attach`; unrelated profiles cannot use this MCP.
+The task store is persisted below the OpenCode data directory. Password rotation
+restarts the parent service and replaces MCP subprocesses. Observation and drift
+outputs include non-secret support state, mark unresolvable host/package inputs,
+and remain review-only. Disable `supportProfile.enable` to roll back without
+deleting sessions or task records.
+
+The generated names can be changed with `supportProfile.name` and
+`supportProfile.mcpName`; `supportProfile.package` may select a reviewed package
+override, while `toolProfile = "essential"` exposes only the core session and
+messaging catalog. The default `full` catalog is required for the complete
+inspection and workflow surface. The MCP endpoint is always the same guest server,
+not a second OpenCode instance. Its runtime password is read from the mounted
+environment file, never from the Nix store, generated JSON, process arguments, or
+reverse-configuration output.
+
+The primary MicroVM check boots the service, exercises the running HTTP API and
+support MCP, and drives a real `opencode attach` client through a PTY. It verifies
+same-server session visibility, deterministic provider responses, runtime-only
+credentials, persistence, and password rotation. Use `toolProfile = "essential"`
+when only the core session and messaging tools are needed; `"full"` is the default.
 
 Reverse configuration is review-only:
 
@@ -122,14 +154,30 @@ osmium-opencode-drift > /tmp/opencode-drift.json
 ```
 
 Outputs omit secret bytes and mark host-only source paths unresolved and
-incomplete. Review and supply those inputs before activation. Run the three
-booting checks with:
+incomplete. Package source identity, readiness, protocol health, and observed
+runtime status is recorded as runtime provenance; live session facts remain an
+explicit unresolved input because querying that endpoint changes OpenCode's
+bookkeeping. Missing or unrepresentable source/package inputs keep a candidate
+non-activatable. Conversion and capture do not mutate the service, sessions,
+credentials, persistence, or task store. Review
+and supply unresolved inputs before activation. Run the booting checks with:
 
 ```sh
 nix build .#checks.x86_64-linux.opencode-server --print-build-logs
 nix build .#checks.x86_64-linux.opencode-server-drift-reverse-configuration --print-build-logs
 nix build .#checks.x86_64-linux.opencode-server-live-capture-reverse-configuration --print-build-logs
+nix build .#checks.x86_64-linux.opencode-mcp-support-profile --print-build-logs
+nix build .#checks.x86_64-linux.opencode-mcp-support-profile-drift-reverse-configuration --print-build-logs
+nix build .#checks.x86_64-linux.opencode-mcp-support-profile-live-capture-reverse-configuration --print-build-logs
 ```
+
+The drift check changes the running generated support state, derives a candidate
+from that mutation, checks secret exclusion and non-mutation, and replays the
+represented endpoint/tool profile in a second MicroVM. The live-capture check
+performs real session listing and messaging, captures twice for deterministic
+output, and replays the captured runtime facts in a second MicroVM. To roll back a
+reviewed declaration, remove or disable `supportProfile`, then run the normal
+reconciliation service; existing sessions and persisted task records are retained.
 
 ## Design
 

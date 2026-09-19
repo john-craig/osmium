@@ -120,6 +120,23 @@
         "type": "github"
       }
     },
+    "opencode-mcp-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1789550803,
+        "narHash": "sha256-oceP/i71IbqqZA1wTpovBjUEaopzRfbp2eMLmJv4NC8=",
+        "owner": "AlaeddineMessadi",
+        "repo": "opencode-mcp",
+        "rev": "6f1f62fd6c151377e09f4fe95bed58eb48c6196b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "AlaeddineMessadi",
+        "repo": "opencode-mcp",
+        "rev": "6f1f62fd6c151377e09f4fe95bed58eb48c6196b",
+        "type": "github"
+      }
+    },
     "opencode-nix": {
       "inputs": {
         "nixpkgs": [
@@ -149,6 +166,7 @@
         "impermanence": "impermanence",
         "microvm": "microvm",
         "nixpkgs": "nixpkgs",
+        "opencode-mcp-src": "opencode-mcp-src",
         "opencode-nix": "opencode-nix",
         "sops-nix": "sops-nix"
       }

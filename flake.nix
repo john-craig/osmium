@@ -10,6 +10,11 @@
     opencode-nix.url = "github:albertov/opencode-nix";
     opencode-nix.inputs.nixpkgs.follows = "nixpkgs";
 
+    opencode-mcp-src = {
+      url = "github:AlaeddineMessadi/opencode-mcp/6f1f62fd6c151377e09f4fe95bed58eb48c6196b";
+      flake = false;
+    };
+
     impermanence.url = "github:nix-community/impermanence";
     impermanence.inputs.nixpkgs.follows = "nixpkgs";
 
@@ -20,7 +25,7 @@
     sops-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, home-manager, opencode-nix, impermanence, microvm, sops-nix }:
+  outputs = { self, nixpkgs, home-manager, opencode-nix, opencode-mcp-src, impermanence, microvm, sops-nix }:
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
@@ -98,7 +103,10 @@
             impermanence.nixosModules.impermanence
             home-manager.nixosModules.home-manager
             sops-nix.nixosModules.sops
-            { nixpkgs.overlays = nixpkgs.lib.mkDefault [ opencode-nix.overlays.default ]; }
+            { nixpkgs.overlays = nixpkgs.lib.mkDefault [
+                opencode-nix.overlays.default
+                (final: _prev: { opencode-mcp = final.callPackage ./modules/packages/opencode-mcp.nix { src = opencode-mcp-src; }; })
+              ]; }
           ./modules
         ];
       };
@@ -235,12 +243,48 @@
                module = self.nixosModules.default;
               };
 
-              opencode-server = import ./tests/opencode-server.nix {
+          opencode-server = import ./tests/opencode-server.nix {
                 inherit pkgs microvm;
                 opencodeNix = opencode-nix;
                 lib = nixpkgs.lib;
                 module = self.nixosModules.default;
-              };
+          };
+
+          opencode-mcp-package = import ./tests/opencode-mcp-package.nix {
+            inherit pkgs;
+            opencodeMcp = self.packages.${system}.opencode-mcp;
+          };
+
+           opencode-mcp-support-profile = import ./tests/opencode-mcp-support-profile.nix {
+            inherit pkgs microvm;
+            opencodeNix = opencode-nix;
+            opencodeMcp = self.packages.${system}.opencode-mcp;
+            lib = nixpkgs.lib;
+            module = self.nixosModules.default;
+           };
+
+           opencode-mcp-support-profile-diagnostic = import ./tests/opencode-mcp-support-profile.nix {
+             inherit pkgs microvm;
+             lib = nixpkgs.lib;
+             module = self.nixosModules.default;
+             opencodeNix = opencode-nix;
+             opencodeMcp = pkgs.callPackage ./modules/packages/opencode-mcp.nix { src = opencode-mcp-src; };
+             diagnosticOnly = true;
+           };
+          opencode-mcp-support-profile-drift-reverse-configuration = import ./tests/opencode-mcp-support-profile-drift-reverse-configuration.nix {
+            inherit pkgs microvm;
+            opencodeNix = opencode-nix;
+            opencodeMcp = self.packages.${system}.opencode-mcp;
+            lib = nixpkgs.lib;
+            module = self.nixosModules.default;
+          };
+          opencode-mcp-support-profile-live-capture-reverse-configuration = import ./tests/opencode-mcp-support-profile-live-capture-reverse-configuration.nix {
+            inherit pkgs microvm;
+            opencodeNix = opencode-nix;
+            opencodeMcp = self.packages.${system}.opencode-mcp;
+            lib = nixpkgs.lib;
+            module = self.nixosModules.default;
+          };
 
               opencode-server-drift-reverse-configuration = import ./tests/opencode-server-drift-reverse-configuration.nix {
                 inherit pkgs microvm;
@@ -292,7 +336,11 @@
 
            osmium-rebrand-fresh = rebrand.osmium-rebrand-fresh;
           osmium-rebrand-migration = rebrand.osmium-rebrand-migration;
-        });
+         });
+
+      packages = forAllSystems (system: {
+        opencode-mcp = nixpkgs.legacyPackages.${system}.callPackage ./modules/packages/opencode-mcp.nix { src = opencode-mcp-src; };
+      });
 
       devShells = forAllSystems (system: {
         default = nixpkgs.legacyPackages.${system}.mkShell {
