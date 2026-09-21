@@ -82,6 +82,26 @@
         }
       ];
 
+      gotifyGuestModules = [
+        microvm.nixosModules.microvm
+        self.nixosModules.default
+        {
+          networking.hostName = "osmium-gotify";
+          system.stateVersion = "25.05";
+          microvm = {
+            hypervisor = "qemu";
+            vcpu = 2;
+            mem = 768;
+            interfaces = [ { type = "user"; id = "gotify"; mac = "02:00:00:00:00:03"; } ];
+          };
+          services.osmium.gotify = {
+            enable = true;
+            hostHttpPort = 3002;
+            admin = { enable = true; username = "admin"; passwordFile = "/etc/gotify-admin-password"; };
+          };
+        }
+      ];
+
       fdroidGuestModules = [
         microvm.nixosModules.microvm
         self.nixosModules.default
@@ -153,6 +173,11 @@
         modules = giteaGuestModules;
       };
 
+      nixosConfigurations.gotify-guest = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = gotifyGuestModules;
+      };
+
       nixosConfigurations.fdroid-guest = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
         modules = fdroidGuestModules;
@@ -205,6 +230,29 @@
               inherit pkgs microvm;
               lib = nixpkgs.lib;
               module = self.nixosModules.default;
+            };
+
+            gotify = import ./tests/gotify.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+            };
+
+            gotify-provisioning = import ./tests/gotify.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+              mode = "provisioning";
+            };
+
+            gotify-drift-reverse-configuration = import ./tests/gotify.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+              mode = "drift-reverse-configuration";
+            };
+
+            gotify-live-capture-reverse-configuration = import ./tests/gotify.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+              mode = "live-capture-reverse-configuration";
             };
 
             remote-gitea-capture = import ./tests/remote-gitea-capture.nix {

@@ -5,9 +5,9 @@ tested with impermanent guest filesystems.
 
 ## Status
 
-The project contains a small native NixOS HTTP service, Gitea integration, and
-filesystem snapshot workflows. They verify that declared state survives a
-reboot while the guest root filesystem is recreated.
+The project contains a small native NixOS HTTP service, Gitea and Gotify
+integrations, and filesystem snapshot workflows. They verify that declared
+state survives a reboot while the guest root filesystem is recreated.
 
 ## OpenCode Server
 
@@ -259,6 +259,57 @@ osmium-fdroid-repository reconcile --input /tmp/fdroid-candidate.json --output /
 Missing signing references, missing artifacts, checksum conflicts, and
 unsupported state remain explicit findings and cannot be activated. Capture
 does not read private keys or passwords.
+
+## Gotify
+
+Gotify is disabled by default. It runs through the native NixOS Gotify module,
+persists `/var/lib/gotify`, and exposes an explicit guest/host HTTP mapping.
+Administrator and user passwords are runtime files readable by `gotify`; they
+are never put in evaluated configuration or the Nix store:
+
+```nix
+services.osmium.gotify = {
+  enable = true;
+  httpPort = 8080;
+  hostHttpPort = 38080;
+  admin = {
+    enable = true;
+    username = "admin";
+    passwordFile = config.sops.secrets.gotify-admin-password.path;
+  };
+  users.alerts = {
+    username = "alerts";
+    passwordFile = config.sops.secrets.gotify-alerts-password.path;
+  };
+  applications.alerts = {
+    owner = "alerts";
+    name = "alerts-client";
+    description = "Application notifications";
+    output = {
+      secretPath = "/var/lib/gotify/credentials/alerts.token";
+      owner = "gotify";
+      group = "gotify";
+      mode = "0400";
+    };
+  };
+};
+```
+
+Application tokens are generated once and written atomically to their protected
+output. The non-secret ledger stores IDs and metadata but never passwords,
+tokens, or reversible digests. A missing token output fails closed and requires
+explicit recovery; application-token rotation is intentionally unsupported.
+Changing a declared user password file updates that user's password during
+reconciliation. Reverse tools are review-only and mark password and token
+outputs unresolved:
+
+```sh
+osmium-gotify capture --output /tmp/gotify-capture.json
+nix build .#checks.x86_64-linux.gotify --print-build-logs
+nix build .#checks.x86_64-linux.gotify-provisioning --print-build-logs
+nix build .#checks.x86_64-linux.gotify-drift-reverse-configuration --print-build-logs
+nix build .#checks.x86_64-linux.gotify-live-capture-reverse-configuration --print-build-logs
+```
 
 ## Gitea
 
