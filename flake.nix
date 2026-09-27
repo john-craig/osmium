@@ -234,9 +234,26 @@
               module = self.nixosModules.default;
             };
 
-            gotify = import ./tests/gotify.nix {
+           gotify = import ./tests/gotify.nix {
+               inherit pkgs microvm;
+               module = self.nixosModules.default;
+             };
+
+            traefik = import ./tests/traefik.nix {
               inherit pkgs microvm;
               module = self.nixosModules.default;
+            };
+
+            traefik-drift-reverse-configuration = import ./tests/traefik-reverse-configuration.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+              mode = "drift";
+            };
+
+            traefik-live-capture-reverse-configuration = import ./tests/traefik-reverse-configuration.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+              mode = "live-capture";
             };
 
           keycloak = import ./tests/keycloak.nix {
