@@ -9,6 +9,30 @@ let
   bootstrapMarker = "${stateDir}/.osmium-admin-bootstrap-complete";
   adminPassword = cfg.admin.passwordFile;
   enabledUsers = cfg.users != { } || cfg.applications != { };
+  ssoClient =
+    if cfg.sso.enable && builtins.hasAttr cfg.sso.keycloak.client config.services.osmium.keycloak.clients
+    then config.services.osmium.keycloak.clients.${cfg.sso.keycloak.client}
+    else null;
+  ssoIssuer = if cfg.sso.enable then lib.removeSuffix "/" config.services.osmium.keycloak.issuer else "";
+  ssoRealmIssuer = if cfg.sso.enable then "${ssoIssuer}/realms/${cfg.sso.keycloak.realm}" else "";
+  ssoBrowserTokenFile =
+    if cfg.sso.enable && builtins.hasAttr cfg.sso.browserPrincipal.application cfg.applications
+    then cfg.applications.${cfg.sso.browserPrincipal.application}.output.secretPath
+    else null;
+  ssoGatewayConfig = pkgs.writeShellScript "osmium-gotify-sso-config" ''
+    set -eu
+    token_file=${lib.escapeShellArg (if ssoBrowserTokenFile == null then "/dev/null" else ssoBrowserTokenFile)}
+    [ -s "$token_file" ] || { echo "Gotify browser application token is unavailable" >&2; exit 1; }
+    token=$(cat "$token_file")
+    [ -n "$token" ] || { echo "Gotify browser application token is empty" >&2; exit 1; }
+    install -d -o root -g nginx -m 0750 /run/osmium-gotify-sso
+    temporary=$(mktemp /run/osmium-gotify-sso/gotify-token.conf.XXXXXX)
+    umask 0077
+    printf 'proxy_set_header Authorization "Bearer %s";\n' "$token" > "$temporary"
+    chown root:nginx "$temporary"
+    chmod 0440 "$temporary"
+    mv -f "$temporary" /run/osmium-gotify-sso/gotify-token.conf
+  '';
 
   wrapper = pkgs.writeShellScript "osmium-gotify-server" ''
     set -eu
@@ -248,32 +272,56 @@ in
     httpPort = lib.mkOption { type = lib.types.port; default = 8080; description = "Guest Gotify HTTP port."; };
     hostHttpPort = lib.mkOption { type = lib.types.port; default = 8080; description = "MicroVM host-forwarded Gotify HTTP port."; };
     environment = lib.mkOption { type = lib.types.attrs; default = { }; description = "Additional Gotify environment settings."; };
+    sso = {
+      enable = lib.mkEnableOption "Keycloak browser SSO for Gotify";
+      keycloak = {
+        realm = lib.mkOption { type = lib.types.strMatching "[A-Za-z0-9._-]+"; description = "Stable Keycloak realm declaration key."; };
+        client = lib.mkOption { type = lib.types.str; description = "Stable Keycloak confidential-client declaration key."; };
+      };
+      callbackUrl = lib.mkOption { type = lib.types.strMatching "https?://[^[:space:]]+"; description = "Exact oauth2-proxy callback URL."; };
+      clientSecretFile = lib.mkOption { type = lib.types.path; description = "Runtime Keycloak client-secret file."; };
+      cookieSecretFile = lib.mkOption { type = lib.types.path; description = "Runtime oauth2-proxy cookie-secret file."; };
+      browserPort = lib.mkOption { type = lib.types.port; default = 8082; description = "Guest browser SSO port."; };
+      hostBrowserPort = lib.mkOption { type = lib.types.port; default = 8082; description = "MicroVM host-forwarded browser SSO port."; };
+      machinePort = lib.mkOption { type = lib.types.port; default = 8081; description = "Guest machine/API reverse-proxy port."; };
+      allowedEmails = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; description = "Exact Keycloak email claims allowed through the browser gateway."; };
+      groupClaimName = lib.mkOption { type = lib.types.str; default = "groups"; description = "OIDC claim containing allowed groups."; };
+      allowedGroups = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; description = "Groups allowed through the browser gateway."; };
+      browserPrincipal = {
+        user = lib.mkOption { type = lib.types.str; description = "Declared non-admin Gotify user used by the browser adapter."; };
+        application = lib.mkOption { type = lib.types.str; description = "Declared Gotify application used by the browser adapter."; };
+      };
+    };
     admin = {
       enable = lib.mkEnableOption "Gotify administrator bootstrap";
       username = lib.mkOption { type = lib.types.strMatching "[A-Za-z0-9._-]+"; default = "admin"; description = "Gotify administrator username."; };
       passwordFile = lib.mkOption { type = lib.types.nullOr lib.types.path; default = null; description = "Runtime file containing the Gotify administrator password."; };
     };
     users = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.submodule ({ ... }: { options = {
-        username = lib.mkOption { type = lib.types.strMatching "[A-Za-z0-9._-]+"; description = "Gotify username."; };
-        passwordFile = lib.mkOption { type = lib.types.path; description = "Runtime user password file."; };
-      }; }));
+      type = lib.types.attrsOf (lib.types.submodule ({ ... }: {
+        options = {
+          username = lib.mkOption { type = lib.types.strMatching "[A-Za-z0-9._-]+"; description = "Gotify username."; };
+          passwordFile = lib.mkOption { type = lib.types.path; description = "Runtime user password file."; };
+        };
+      }));
       default = { };
       description = "Declarative non-administrator Gotify users.";
     };
     applications = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.submodule ({ ... }: { options = {
-        owner = lib.mkOption { type = lib.types.str; description = "Declaration key of the owning Gotify user."; };
-        name = lib.mkOption { type = lib.types.strMatching "[A-Za-z0-9._ -]+"; description = "Gotify application name."; };
-        description = lib.mkOption { type = lib.types.str; default = ""; description = "Gotify application description."; };
-        output = {
-          secretPath = lib.mkOption { type = lib.types.str; description = "Protected app-token output path."; };
-          owner = lib.mkOption { type = lib.types.str; default = "root"; description = "Token output owner."; };
-          group = lib.mkOption { type = lib.types.str; default = "root"; description = "Token output group."; };
-          mode = lib.mkOption { type = lib.types.strMatching "0[0-7]{3}"; default = "0400"; description = "Token output mode."; };
-          persistent = lib.mkOption { type = lib.types.bool; default = true; description = "Persist the token output."; };
+      type = lib.types.attrsOf (lib.types.submodule ({ ... }: {
+        options = {
+          owner = lib.mkOption { type = lib.types.str; description = "Declaration key of the owning Gotify user."; };
+          name = lib.mkOption { type = lib.types.strMatching "[A-Za-z0-9._ -]+"; description = "Gotify application name."; };
+          description = lib.mkOption { type = lib.types.str; default = ""; description = "Gotify application description."; };
+          output = {
+            secretPath = lib.mkOption { type = lib.types.str; description = "Protected app-token output path."; };
+            owner = lib.mkOption { type = lib.types.str; default = "root"; description = "Token output owner."; };
+            group = lib.mkOption { type = lib.types.str; default = "root"; description = "Token output group."; };
+            mode = lib.mkOption { type = lib.types.strMatching "0[0-7]{3}"; default = "0400"; description = "Token output mode."; };
+            persistent = lib.mkOption { type = lib.types.bool; default = true; description = "Persist the token output."; };
+          };
         };
-      }; }));
+      }));
       default = { };
       description = "Declarative Gotify applications and generated tokens.";
     };
@@ -290,6 +338,16 @@ in
       { assertion = lib.length (lib.unique (map (app: "${app.owner}:${app.name}") applications)) == lib.length applications; message = "Gotify application identities must be unique per owner."; }
       { assertion = lib.all (app: lib.hasPrefix "/var/lib/" app.output.secretPath || lib.hasPrefix "/run/" app.output.secretPath) applications; message = "Gotify token outputs must be below /var/lib or /run."; }
       { assertion = lib.length (lib.unique [ cfg.hostHttpPort ]) == 1; message = "Gotify host HTTP port is invalid."; }
+      { assertion = !cfg.sso.enable || config.services.osmium.keycloak.enable; message = "Gotify Keycloak SSO requires the Osmium Keycloak module to be enabled."; }
+      { assertion = !cfg.sso.enable || ssoClient != null; message = "Gotify Keycloak SSO must reference an existing Keycloak client declaration."; }
+      { assertion = !cfg.sso.enable || (ssoClient != null && ssoClient.realm == cfg.sso.keycloak.realm && !ssoClient.public && ssoClient.secretFile == cfg.sso.clientSecretFile); message = "Gotify Keycloak SSO requires a confidential client in the selected realm with the same runtime secret-file reference."; }
+      { assertion = !cfg.sso.enable || (ssoClient != null && lib.elem "authorization-code" ssoClient.flows && lib.elem cfg.sso.callbackUrl ssoClient.redirectUris); message = "Gotify Keycloak SSO callbackUrl must be an exact authorization-code redirect URI on the selected Keycloak client."; }
+      { assertion = !cfg.sso.enable || !lib.hasPrefix "http://" cfg.sso.callbackUrl || config.services.osmium.keycloak.allowInsecureHttp; message = "Gotify Keycloak SSO callbackUrl must use HTTPS outside isolated insecure-HTTP tests."; }
+      { assertion = !cfg.sso.enable || builtins.hasAttr cfg.sso.browserPrincipal.user cfg.users; message = "Gotify SSO browserPrincipal.user must reference a declared Gotify user."; }
+      { assertion = !cfg.sso.enable || builtins.hasAttr cfg.sso.browserPrincipal.application cfg.applications; message = "Gotify SSO browserPrincipal.application must reference a declared Gotify application."; }
+      { assertion = !cfg.sso.enable || (builtins.hasAttr cfg.sso.browserPrincipal.application cfg.applications && cfg.applications.${cfg.sso.browserPrincipal.application}.owner == cfg.sso.browserPrincipal.user); message = "Gotify SSO browser application must be owned by the browser principal user."; }
+      { assertion = !cfg.sso.enable || (ssoBrowserTokenFile != null && (lib.hasPrefix "/var/lib/" ssoBrowserTokenFile || lib.hasPrefix "/run/" ssoBrowserTokenFile)); message = "Gotify SSO browser application token must use a supported runtime or persistent output path."; }
+      { assertion = !cfg.sso.enable || (cfg.hostHttpPort != cfg.sso.hostBrowserPort && cfg.httpPort != cfg.sso.browserPort && cfg.httpPort != cfg.sso.machinePort && cfg.sso.browserPort != cfg.sso.machinePort); message = "Gotify SSO browser, machine, upstream, and host ports must be distinct."; }
     ];
 
     users.users.gotify = { isSystemUser = true; group = "gotify"; home = stateDir; createHome = true; };
@@ -298,7 +356,7 @@ in
       enable = true;
       package = cfg.package;
       stateDirectoryName = lib.removePrefix "/var/lib/" stateDir;
-      environment = cfg.environment // { GOTIFY_SERVER_PORT = cfg.httpPort; GOTIFY_SERVER_BIND_ADDRESS = "0.0.0.0"; };
+      environment = cfg.environment // { GOTIFY_SERVER_PORT = cfg.httpPort; GOTIFY_SERVER_BIND_ADDRESS = if cfg.sso.enable then "127.0.0.1" else "0.0.0.0"; };
     };
     systemd.services.gotify-server.serviceConfig = {
       DynamicUser = lib.mkForce false;
@@ -308,7 +366,7 @@ in
       ExecStartPre = [ "+${pkgs.writeShellScript "osmium-gotify-fix-state-owner" "${pkgs.coreutils}/bin/chown -R gotify:gotify ${lib.escapeShellArg stateDir}"}" ];
       ExecStart = lib.mkIf cfg.admin.enable (lib.mkForce wrapper);
     };
-    environment.persistence."/persistent".directories = [ { directory = stateDir; user = "gotify"; group = "gotify"; mode = "0750"; } ];
+    environment.persistence."/persistent".directories = [{ directory = stateDir; user = "gotify"; group = "gotify"; mode = "0750"; }];
     environment.systemPackages = [ reverseTool ];
 
     systemd.services.osmium-gotify-admin-bootstrap = lib.mkIf cfg.admin.enable {
@@ -317,14 +375,21 @@ in
       after = [ "gotify-server.service" ];
       requires = [ "gotify-server.service" ];
       path = [ pkgs.curl pkgs.jq pkgs.coreutils ];
-      serviceConfig = { Type = "oneshot"; RemainAfterExit = true; User = "gotify"; Group = "gotify"; UMask = "0077"; ExecStart = pkgs.writeShellScript "osmium-gotify-admin-bootstrap" ''
-        set -eu
-        if [ -e ${lib.escapeShellArg bootstrapMarker} ]; then exit 0; fi
-        password=$(cat ${lib.escapeShellArg cfg.admin.passwordFile})
-        [ -n "$password" ] || { echo "Gotify administrator password file is empty" >&2; exit 1; }
-        curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 -u "${lib.escapeShellArg cfg.admin.username}:$password" http://127.0.0.1:${toString cfg.httpPort}/current/user >/dev/null
-        install -m 0640 /dev/null ${lib.escapeShellArg bootstrapMarker}
-      ''; };
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = "gotify";
+        Group = "gotify";
+        UMask = "0077";
+        ExecStart = pkgs.writeShellScript "osmium-gotify-admin-bootstrap" ''
+          set -eu
+          if [ -e ${lib.escapeShellArg bootstrapMarker} ]; then exit 0; fi
+          password=$(cat ${lib.escapeShellArg cfg.admin.passwordFile})
+          [ -n "$password" ] || { echo "Gotify administrator password file is empty" >&2; exit 1; }
+          curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 -u "${lib.escapeShellArg cfg.admin.username}:$password" http://127.0.0.1:${toString cfg.httpPort}/current/user >/dev/null
+          install -m 0640 /dev/null ${lib.escapeShellArg bootstrapMarker}
+        '';
+      };
     };
     systemd.services.osmium-gotify-reconcile = lib.mkIf enabledUsers {
       description = "Reconcile declarative Osmium Gotify users and applications";
@@ -335,7 +400,108 @@ in
       serviceConfig = { Type = "oneshot"; User = "root"; Group = "root"; UMask = "0077"; ExecStart = reconcile; };
     };
     system.activationScripts.osmium-gotify-reconcile = lib.mkIf enabledUsers { text = "${pkgs.systemd}/bin/systemctl restart osmium-gotify-reconcile.service || true"; };
+    services.oauth2-proxy = lib.mkIf cfg.sso.enable {
+      enable = true;
+      provider = "oidc";
+      clientID = ssoClient.clientId;
+      clientSecretFile = cfg.sso.clientSecretFile;
+      cookie.secretFile = cfg.sso.cookieSecretFile;
+      cookie.secure = lib.hasPrefix "https://" cfg.sso.callbackUrl;
+      oidcIssuerUrl = ssoRealmIssuer;
+      redirectURL = cfg.sso.callbackUrl;
+      httpAddress = "127.0.0.1:4180";
+      upstream = "static://202";
+      reverseProxy = true;
+      setXauthrequest = true;
+      trustedProxyIP = [ "127.0.0.1/32" ];
+      passAccessToken = false;
+      passBasicAuth = false;
+      scope = lib.concatStringsSep " " [ "openid" "profile" "email" ];
+      email.addresses = lib.concatStringsSep "\n" cfg.sso.allowedEmails;
+      extraConfig = lib.optionalAttrs (cfg.sso.allowedGroups != [ ])
+        {
+          "oidc-groups-claim" = cfg.sso.groupClaimName;
+          "allowed-group" = lib.concatStringsSep "," cfg.sso.allowedGroups;
+        } // { "code-challenge-method" = "S256"; };
+    };
+    systemd.services.oauth2-proxy = lib.mkIf cfg.sso.enable {
+      after = [ "osmium-keycloak-reconcile.service" ];
+      requires = [ "osmium-keycloak-reconcile.service" ];
+    };
+    services.nginx = lib.mkIf cfg.sso.enable {
+      enable = true;
+      virtualHosts."gotify-browser" = {
+        listen = [{ addr = "0.0.0.0"; port = cfg.sso.browserPort; }];
+        locations."/oauth2/" = {
+          proxyPass = "http://127.0.0.1:4180";
+          extraConfig = ''
+            proxy_pass_request_body off;
+            proxy_set_header Content-Length "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Forwarded-Proto $scheme;
+          '';
+        };
+        locations."/" = {
+          proxyPass = "http://127.0.0.1:${toString cfg.httpPort}";
+          extraConfig = ''
+            auth_request /oauth2/auth;
+            error_page 401 =302 /oauth2/sign_in?rd=$request_uri;
+            proxy_set_header Authorization "";
+            proxy_set_header X-Forwarded-User "";
+            proxy_set_header X-Forwarded-Email "";
+            proxy_set_header X-Auth-Request-User "";
+            proxy_set_header X-Auth-Request-Email "";
+            include /run/osmium-gotify-sso/gotify-token.conf;
+          '';
+        };
+      };
+      virtualHosts."gotify-machine" = {
+        listen = [{ addr = "0.0.0.0"; port = cfg.sso.machinePort; }];
+        locations."/" = {
+          proxyPass = "http://127.0.0.1:${toString cfg.httpPort}";
+          extraConfig = ''
+            proxy_set_header X-Forwarded-User "";
+            proxy_set_header X-Forwarded-Email "";
+            proxy_set_header X-Auth-Request-User "";
+            proxy_set_header X-Auth-Request-Email "";
+          '';
+        };
+      };
+    };
+    systemd.services.osmium-gotify-sso-config = lib.mkIf cfg.sso.enable {
+      description = "Prepare the runtime Gotify browser credential include";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "osmium-gotify-reconcile.service" ];
+      requires = [ "osmium-gotify-reconcile.service" ];
+      serviceConfig = { Type = "oneshot"; RemainAfterExit = true; UMask = "0077"; ExecStart = ssoGatewayConfig; };
+    };
+    systemd.services.nginx = lib.mkIf cfg.sso.enable {
+      after = [ "osmium-gotify-sso-config.service" ];
+      requires = [ "osmium-gotify-sso-config.service" ];
+    };
+    systemd.paths.osmium-gotify-sso = lib.mkIf cfg.sso.enable {
+      wantedBy = [ "multi-user.target" ];
+      pathConfig = {
+        PathChanged = [ cfg.sso.clientSecretFile cfg.sso.cookieSecretFile ] ++ lib.optional (ssoBrowserTokenFile != null) ssoBrowserTokenFile;
+        Unit = "osmium-gotify-sso-reload.service";
+      };
+    };
+    systemd.services.osmium-gotify-sso-reload = lib.mkIf cfg.sso.enable {
+      description = "Reload Gotify Keycloak browser SSO credentials";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = pkgs.writeShellScript "osmium-gotify-sso-reload" ''
+          set -eu
+          ${ssoGatewayConfig}
+          ${pkgs.systemd}/bin/systemctl try-restart oauth2-proxy.service nginx.service
+        '';
+      };
+    };
   } // lib.optionalAttrs (options ? microvm) {
-    microvm.forwardPorts = [ { from = "host"; proto = "tcp"; host.port = cfg.hostHttpPort; guest.port = cfg.httpPort; } ];
+    microvm.forwardPorts = [
+      { from = "host"; proto = "tcp"; host.port = cfg.hostHttpPort; guest.port = if cfg.sso.enable then cfg.sso.machinePort else cfg.httpPort; }
+    ] ++ lib.optional cfg.sso.enable { from = "host"; proto = "tcp"; host.port = cfg.hostBrowserPort; guest.port = cfg.sso.browserPort; };
+    networking.firewall.allowedTCPPorts = lib.optional cfg.sso.enable cfg.sso.machinePort ++ lib.optional cfg.sso.enable cfg.sso.browserPort;
   });
 }

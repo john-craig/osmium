@@ -63,3 +63,20 @@ example:
 nix build .#checks.x86_64-linux.<service>-drift-reverse-configuration --print-build-logs
 nix build .#checks.x86_64-linux.<service>-live-capture-reverse-configuration --print-build-logs
 ```
+
+## Keycloak SSO Integration
+
+When proposing or implementing a future browser-facing service, assess native
+OpenID Connect support first. If native support is unavailable, use the bounded
+Keycloak gateway pattern with loopback-only upstreams, separate browser and
+machine endpoints, runtime-only client and cookie secrets, and stripped
+identity headers. The OpenSpec proposal, design, task list, and implementation
+must record this assessment and include a booting Keycloak-to-service login
+check when integration is practical.
+
+An exemption is allowed only when the client protocol cannot follow an
+interactive browser flow or the service has no browser surface. The exemption
+must name the incompatible protocol or missing surface, preserve the correct
+machine or repository authentication path, and include an executable boundary
+test. Check reports must identify the command, whether it booted a MicroVM, and
+which login, denial, bypass, and machine-authentication behavior was verified.

@@ -8,10 +8,34 @@ let
   providerRecord = "${reconciliationDir}/provider-auth.json";
   serverRecord = "${reconciliationDir}/server-environment.json";
   supportRuntimeEnvironmentFile = "/run/osmium-opencode/support-server.env";
+  userRuntimeEnvironmentFile = "/run/user/${toString cfg.uid}/opencode-server.env";
   supportRuntimeLog = "/run/osmium-opencode/support-mcp.log";
   supportReadinessFile = "${reconciliationDir}/support-readiness.json";
   serverEnvironmentFile = "${cfg.credentials.guestDirectory}/${cfg.credentials.serverEnvironmentFile}";
   providerAuthFile = "${cfg.credentials.guestDirectory}/${cfg.credentials.providerAuthFile}";
+  ssoClient =
+    if cfg.sso.enable && builtins.hasAttr cfg.sso.keycloak.client config.services.osmium.keycloak.clients
+    then config.services.osmium.keycloak.clients.${cfg.sso.keycloak.client}
+    else null;
+  ssoIssuer = if cfg.sso.enable then lib.removeSuffix "/" config.services.osmium.keycloak.issuer else "";
+  ssoRealmIssuer = if cfg.sso.enable then "${ssoIssuer}/realms/${cfg.sso.keycloak.realm}" else "";
+  ssoBasicAuthFile = "/run/osmium-opencode/sso-basic-auth.conf";
+  ssoGatewayConfig = pkgs.writeShellScript "osmium-opencode-sso-config" ''
+    set -eu
+     env_file=${lib.escapeShellArg userRuntimeEnvironmentFile}
+    [ -r "$env_file" ] && [ -s "$env_file" ] || { echo "OpenCode SSO server environment file is unavailable" >&2; exit 1; }
+    username=$(awk -F= '$1 == "OPENCODE_SERVER_USERNAME" { print substr($0, index($0, "=") + 1); exit }' "$env_file")
+    password=$(awk -F= '$1 == "OPENCODE_SERVER_PASSWORD" { print substr($0, index($0, "=") + 1); exit }' "$env_file")
+    [ "$username" = ${lib.escapeShellArg cfg.httpUsername} ] || { echo "OpenCode SSO username does not match declaration" >&2; exit 1; }
+    [ -n "$password" ] || { echo "OpenCode SSO password is unavailable" >&2; exit 1; }
+    install -d -m 0750 -o root -g nginx /run/osmium-opencode
+    temporary=$(mktemp ${lib.escapeShellArg "${ssoBasicAuthFile}.XXXXXX"})
+    umask 0077
+    printf 'proxy_set_header Authorization "Basic %s";\n' "$(printf '%s:%s' "$username" "$password" | base64 -w0)" > "$temporary"
+    chown root:nginx "$temporary"
+    chmod 0440 "$temporary"
+    mv -f "$temporary" ${lib.escapeShellArg ssoBasicAuthFile}
+  '';
   microvmConfig = lib.optionalAttrs (options ? microvm) {
     microvm = {
       shares = [ {
@@ -29,7 +53,10 @@ let
         mountPoint = workspace.guestPath;
         readOnly = true;
       }) cfg.workspaces;
-      forwardPorts = [ { from = "host"; proto = "tcp"; host.port = cfg.hostPort; guest.port = cfg.guestPort; } ];
+      forwardPorts = if cfg.sso.enable then [
+        { from = "host"; proto = "tcp"; host.port = cfg.sso.hostMachinePort; guest.port = cfg.sso.machinePort; }
+        { from = "host"; proto = "tcp"; host.port = cfg.sso.hostBrowserPort; guest.port = cfg.sso.browserPort; }
+      ] else [ { from = "host"; proto = "tcp"; host.port = cfg.hostPort; guest.port = cfg.guestPort; } ];
     };
   };
   names = lib.attrNames cfg.workspaces;
@@ -242,8 +269,9 @@ let
     auth=${lib.escapeShellArg authFile}
     records=${lib.escapeShellArg reconciliationDir}
     provider_record=${lib.escapeShellArg providerRecord}
-    server_record=${lib.escapeShellArg serverRecord}
-    support_env_file=${lib.escapeShellArg supportRuntimeEnvironmentFile}
+     server_record=${lib.escapeShellArg serverRecord}
+     user_env_file=${lib.escapeShellArg userRuntimeEnvironmentFile}
+     support_env_file=${lib.escapeShellArg supportRuntimeEnvironmentFile}
     support_runtime_log=${lib.escapeShellArg supportRuntimeLog}
     user=${lib.escapeShellArg cfg.user}
     group=${lib.escapeShellArg cfg.group}
@@ -252,11 +280,15 @@ let
       echo "$1" >&2
       exit 1
     }
-    install -d -m 0750 -o "$user" -g "$group" "$records" "$(dirname "$auth")"
-    [ -d "$cred" ] || fail_closed "OpenCode credential mount is unavailable"
-    [ -r "$env_file" ] && [ -s "$env_file" ] || fail_closed "OpenCode server environment file is unavailable"
-    password=$(awk -F= '$1 == "OPENCODE_SERVER_PASSWORD" { print substr($0, index($0, "=") + 1); exit }' "$env_file")
-    [ -n "$password" ] || fail_closed "OpenCode server environment file has no password"
+     install -d -m 0750 -o "$user" -g "$group" "$records" "$(dirname "$auth")"
+     [ -d "$cred" ] || fail_closed "OpenCode credential mount is unavailable"
+     [ -r "$env_file" ] && [ -s "$env_file" ] || fail_closed "OpenCode server environment file is unavailable"
+     systemctl start "user-runtime-dir@${toString cfg.uid}.service"
+     password=$(awk -F= '$1 == "OPENCODE_SERVER_PASSWORD" { print substr($0, index($0, "=") + 1); exit }' "$env_file")
+     [ -n "$password" ] || fail_closed "OpenCode server environment file has no password"
+     user_env_tmp=$(mktemp "$user_env_file.XXXXXX")
+     install -o "$user" -g "$group" -m 0400 "$env_file" "$user_env_tmp"
+     mv -f "$user_env_tmp" "$user_env_file"
     ${lib.optionalString supportEnabled ''
       support_env_tmp=$(mktemp "$support_env_file.XXXXXX")
       printf 'OPENCODE_SERVER_PASSWORD=%s\n' "$password" > "$support_env_tmp"
@@ -461,6 +493,23 @@ in
     };
     persistence.enable = lib.mkEnableOption "OpenCode persistence" // { default = true; };
     reverseConfiguration.enable = lib.mkEnableOption "OpenCode reverse configuration tooling";
+    sso = {
+      enable = lib.mkEnableOption "Keycloak browser SSO for OpenCode";
+      keycloak = {
+        realm = lib.mkOption { type = lib.types.strMatching "[A-Za-z0-9._-]+"; description = "Stable Keycloak realm declaration key."; };
+        client = lib.mkOption { type = lib.types.str; description = "Stable Keycloak confidential-client declaration key."; };
+      };
+      callbackUrl = lib.mkOption { type = lib.types.strMatching "https?://[^[:space:]]+"; description = "Exact oauth2-proxy callback URL."; };
+      clientSecretFile = lib.mkOption { type = lib.types.path; description = "Runtime Keycloak client-secret file."; };
+      cookieSecretFile = lib.mkOption { type = lib.types.path; description = "Runtime oauth2-proxy cookie-secret file."; };
+      browserPort = lib.mkOption { type = lib.types.port; default = 4097; description = "Guest browser SSO port."; };
+      hostBrowserPort = lib.mkOption { type = lib.types.port; default = 4097; description = "MicroVM host-forwarded browser SSO port."; };
+      machinePort = lib.mkOption { type = lib.types.port; default = 4098; description = "Guest machine/API port."; };
+      hostMachinePort = lib.mkOption { type = lib.types.port; default = 4098; description = "MicroVM host-forwarded machine/API port."; };
+      allowedEmails = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; description = "Exact Keycloak email claims allowed through the browser gateway."; };
+      groupClaimName = lib.mkOption { type = lib.types.str; default = "groups"; description = "OIDC claim containing allowed groups."; };
+      allowedGroups = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; description = "Groups allowed through the browser gateway."; };
+    };
   };
 
   config = lib.mkIf cfg.enable ({
@@ -488,6 +537,14 @@ in
       { assertion = !(cfg.settings ? agent && profileNames != [ ]); message = "OpenCode base settings must not redefine generated profile agents."; }
       { assertion = !(cfg.settings ? mcp && mcpNames != [ ]); message = "OpenCode base settings must not redefine generated MCP servers."; }
       { assertion = !(cfg.settings ? skills && skillNames != [ ]); message = "OpenCode base settings must not redefine generated skill paths."; }
+      { assertion = !cfg.sso.enable || config.services.osmium.keycloak.enable; message = "OpenCode Keycloak SSO requires the Osmium Keycloak module to be enabled."; }
+      { assertion = !cfg.sso.enable || ssoClient != null; message = "OpenCode Keycloak SSO must reference an existing Keycloak client declaration."; }
+      { assertion = !cfg.sso.enable || (ssoClient != null && ssoClient.realm == cfg.sso.keycloak.realm && !ssoClient.public && ssoClient.secretFile == cfg.sso.clientSecretFile); message = "OpenCode Keycloak SSO requires a confidential client in the selected realm with the same runtime secret-file reference."; }
+      { assertion = !cfg.sso.enable || (ssoClient != null && lib.elem "authorization-code" ssoClient.flows && lib.elem cfg.sso.callbackUrl ssoClient.redirectUris); message = "OpenCode Keycloak SSO callbackUrl must be an exact authorization-code redirect URI on the selected Keycloak client."; }
+      { assertion = !cfg.sso.enable || !lib.hasPrefix "http://" cfg.sso.callbackUrl || config.services.osmium.keycloak.allowInsecureHttp; message = "OpenCode Keycloak SSO callbackUrl must use HTTPS outside isolated insecure-HTTP tests."; }
+      { assertion = !cfg.sso.enable || (cfg.listenAddress == "127.0.0.1" || cfg.listenAddress == "::1" || cfg.listenAddress == "localhost"); message = "OpenCode SSO requires the raw upstream to bind to loopback."; }
+      { assertion = !cfg.sso.enable || lib.length (lib.unique [ cfg.guestPort cfg.sso.browserPort cfg.sso.machinePort ]) == 3; message = "OpenCode SSO upstream, browser, and machine guest ports must be distinct."; }
+      { assertion = !cfg.sso.enable || lib.length (lib.unique [ cfg.sso.hostBrowserPort cfg.sso.hostMachinePort ]) == 2; message = "OpenCode SSO browser and machine host ports must be distinct."; }
     ];
     users.groups.${cfg.group} = { };
     users.users.${cfg.user} = { uid = cfg.uid; group = cfg.group; home = cfg.home; createHome = true; isNormalUser = true; hashedPassword = "!"; linger = true; };
@@ -502,7 +559,8 @@ in
       "d ${cfg.home}/.local/share 0750 ${cfg.user} ${cfg.group} -"
       "d ${stateDir} 0750 ${cfg.user} ${cfg.group} -"
       "d ${stateDir}/support-task-store 0750 ${cfg.user} ${cfg.group} -"
-       "d /run/osmium-opencode 0750 ${cfg.user} ${cfg.group} -"
+      "d ${cfg.credentials.guestDirectory} 0750 ${cfg.user} ${cfg.group} -"
+        "d /run/osmium-opencode 0750 ${cfg.user} ${cfg.group} -"
      ];
     home-manager.useGlobalPkgs = true;
     home-manager.useUserPackages = true;
@@ -518,7 +576,7 @@ in
         extraPackages = cfg.extraPackages ++ [ xdgOpen ];
         web = {
           enable = true;
-          environmentFile = serverEnvironmentFile;
+           environmentFile = userRuntimeEnvironmentFile;
           extraArgs = [ "--hostname" cfg.listenAddress "--port" (toString cfg.guestPort) ] ++ lib.concatMap (origin: [ "--cors" origin ]) cfg.corsOrigins;
         };
       };
@@ -566,6 +624,102 @@ in
          ExecStart = readiness;
          ExecStartPost = lib.mkIf supportEnabled supportReadiness;
        };
+     };
+    services.oauth2-proxy = lib.mkIf cfg.sso.enable {
+      enable = true;
+      provider = "oidc";
+      clientID = ssoClient.clientId;
+      clientSecretFile = cfg.sso.clientSecretFile;
+      cookie.secretFile = cfg.sso.cookieSecretFile;
+      cookie.secure = lib.hasPrefix "https://" cfg.sso.callbackUrl;
+      oidcIssuerUrl = ssoRealmIssuer;
+      redirectURL = cfg.sso.callbackUrl;
+      httpAddress = "127.0.0.1:4180";
+      upstream = "static://202";
+      reverseProxy = true;
+      setXauthrequest = true;
+      trustedProxyIP = [ "127.0.0.1/32" ];
+      passAccessToken = false;
+      passBasicAuth = false;
+      scope = lib.concatStringsSep " " [ "openid" "profile" "email" ];
+      email.addresses = lib.concatStringsSep "\n" cfg.sso.allowedEmails;
+      extraConfig = lib.optionalAttrs (cfg.sso.allowedGroups != [ ]) {
+        "oidc-groups-claim" = cfg.sso.groupClaimName;
+        "allowed-group" = lib.concatStringsSep "," cfg.sso.allowedGroups;
+      } // { "code-challenge-method" = "S256"; };
+    };
+    systemd.services.oauth2-proxy = lib.mkIf cfg.sso.enable {
+      after = [ "osmium-keycloak-reconcile.service" ];
+      requires = [ "osmium-keycloak-reconcile.service" ];
+    };
+    services.nginx = lib.mkIf cfg.sso.enable {
+      enable = true;
+      virtualHosts."opencode-browser" = {
+        listen = [{ addr = "0.0.0.0"; port = cfg.sso.browserPort; }];
+        locations."/oauth2/" = {
+          proxyPass = "http://127.0.0.1:4180";
+          extraConfig = ''
+            proxy_pass_request_body off;
+            proxy_set_header Content-Length "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Forwarded-Proto $scheme;
+          '';
+        };
+        locations."/" = {
+          proxyPass = "http://127.0.0.1:${toString cfg.guestPort}";
+          extraConfig = ''
+            auth_request /oauth2/auth;
+            error_page 401 =302 /oauth2/sign_in?rd=$request_uri;
+            proxy_set_header Authorization "";
+            proxy_set_header X-Forwarded-User "";
+            proxy_set_header X-Forwarded-Email "";
+            proxy_set_header X-Auth-Request-User "";
+            proxy_set_header X-Auth-Request-Email "";
+            include ${ssoBasicAuthFile};
+          '';
+        };
+      };
+      virtualHosts."opencode-machine" = {
+        listen = [{ addr = "0.0.0.0"; port = cfg.sso.machinePort; }];
+        locations."/" = {
+          proxyPass = "http://127.0.0.1:${toString cfg.guestPort}";
+          extraConfig = ''
+            proxy_set_header X-Forwarded-User "";
+            proxy_set_header X-Forwarded-Email "";
+            proxy_set_header X-Auth-Request-User "";
+            proxy_set_header X-Auth-Request-Email "";
+          '';
+        };
+      };
+    };
+    systemd.services.osmium-opencode-sso-config = lib.mkIf cfg.sso.enable {
+      description = "Prepare the runtime OpenCode browser credential include";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "osmium-opencode-reconcile.service" ];
+      requires = [ "osmium-opencode-reconcile.service" ];
+      path = [ pkgs.coreutils pkgs.gawk pkgs.findutils pkgs.gnused ];
+      serviceConfig = { Type = "oneshot"; RemainAfterExit = true; UMask = "0077"; ExecStart = ssoGatewayConfig; };
+    };
+    systemd.services.nginx = lib.mkIf cfg.sso.enable {
+      after = [ "osmium-opencode-sso-config.service" ];
+      requires = [ "osmium-opencode-sso-config.service" ];
+    };
+    systemd.paths.osmium-opencode-sso = lib.mkIf cfg.sso.enable {
+      wantedBy = [ "multi-user.target" ];
+      pathConfig = { PathChanged = [ cfg.sso.clientSecretFile cfg.sso.cookieSecretFile serverEnvironmentFile ]; Unit = "osmium-opencode-sso-reload.service"; };
+    };
+    systemd.services.osmium-opencode-sso-reload = lib.mkIf cfg.sso.enable {
+      description = "Reload OpenCode Keycloak browser SSO credentials";
+      path = [ pkgs.coreutils pkgs.gawk pkgs.findutils pkgs.gnused ];
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = pkgs.writeShellScript "osmium-opencode-sso-reload" ''
+          set -eu
+          ${ssoGatewayConfig}
+          ${pkgs.systemd}/bin/systemctl try-restart oauth2-proxy.service nginx.service
+        '';
+      };
     };
     environment.systemPackages = [ xdgOpen ]
       ++ lib.optional supportEnabled supportLauncher
@@ -579,6 +733,6 @@ in
       ];
     };
   } // microvmConfig // {
-    networking.firewall.allowedTCPPorts = [ cfg.guestPort ];
+     networking.firewall.allowedTCPPorts = if cfg.sso.enable then [ cfg.sso.machinePort cfg.sso.browserPort ] else [ cfg.guestPort ];
   });
 }

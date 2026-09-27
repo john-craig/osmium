@@ -6,6 +6,7 @@
     ./services/fdroid-repository.nix
     ./services/filesystem-snapshot.nix
     ./services/opencode-server.nix
+    ./services/keycloak.nix
     ./compatibility.nix
   ];
 }

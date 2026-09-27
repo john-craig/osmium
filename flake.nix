@@ -123,10 +123,12 @@
             impermanence.nixosModules.impermanence
             home-manager.nixosModules.home-manager
             sops-nix.nixosModules.sops
-            { nixpkgs.overlays = nixpkgs.lib.mkDefault [
+          {
+            nixpkgs.overlays = nixpkgs.lib.mkDefault [
                 opencode-nix.overlays.default
                 (final: _prev: { opencode-mcp = final.callPackage ./modules/packages/opencode-mcp.nix { src = opencode-mcp-src; }; })
-              ]; }
+            ];
+          }
           ./modules
         ];
       };
@@ -237,6 +239,30 @@
               module = self.nixosModules.default;
             };
 
+          keycloak = import ./tests/keycloak.nix {
+            inherit pkgs microvm;
+            lib = nixpkgs.lib;
+            module = self.nixosModules.default;
+          };
+
+          keycloak-provisioning = import ./tests/keycloak-provisioning.nix {
+            inherit pkgs microvm;
+            module = self.nixosModules.default;
+            mode = "provisioning";
+          };
+
+          keycloak-drift-reverse-configuration = import ./tests/keycloak-provisioning.nix {
+            inherit pkgs microvm;
+            module = self.nixosModules.default;
+            mode = "drift-reverse-configuration";
+          };
+
+          keycloak-live-capture-reverse-configuration = import ./tests/keycloak-provisioning.nix {
+            inherit pkgs microvm;
+            module = self.nixosModules.default;
+            mode = "live-capture-reverse-configuration";
+          };
+
             gotify-provisioning = import ./tests/gotify.nix {
               inherit pkgs microvm;
               module = self.nixosModules.default;
@@ -291,7 +317,26 @@
                module = self.nixosModules.default;
               };
 
-          opencode-server = import ./tests/opencode-server.nix {
+           keycloak-sso-gitea = import ./tests/keycloak-sso-gitea.nix {
+             inherit pkgs microvm;
+             lib = nixpkgs.lib;
+             module = self.nixosModules.default;
+           };
+
+            keycloak-sso-gotify = import ./tests/keycloak-sso-gotify.nix {
+              inherit pkgs microvm;
+              lib = nixpkgs.lib;
+              module = self.nixosModules.default;
+            };
+
+            keycloak-sso-opencode = import ./tests/keycloak-sso-opencode.nix {
+              inherit pkgs microvm;
+              lib = nixpkgs.lib;
+              module = self.nixosModules.default;
+              opencodeNix = opencode-nix;
+            };
+
+           opencode-server = import ./tests/opencode-server.nix {
                 inherit pkgs microvm;
                 opencodeNix = opencode-nix;
                 lib = nixpkgs.lib;
