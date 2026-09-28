@@ -10,25 +10,27 @@ live Keycloak state into secret-safe Osmium declaration candidates.
 ### Requirement: Drift conversion covers supported declarative attributes
 
 The system SHALL compare declared and observed Keycloak realms, key-provider
-metadata, clients, scopes, roles, groups, users, mappings, and non-secret
-credential state. It SHALL produce a deterministic, reviewable Osmium candidate
+metadata, clients, scopes, roles, groups, users, mappings, non-secret credential
+state, supported LLDAP federation metadata, and bounded LLDAP
+administration-gateway metadata. It SHALL produce a deterministic, reviewable
+Osmium candidate
 derived from the runtime observation, with field-level findings, provenance,
 completeness, unsupported-state reporting, and unresolved secret-file
-requirements. Conversion SHALL NOT mutate Keycloak, source files, ledgers, or
-running services.
+requirements. Conversion SHALL NOT mutate Keycloak, source files, ledgers, LLDAP,
+or running services.
 
 #### Scenario: Runtime state drifts from the declaration
 
-- **WHEN** a supported non-secret client, role, group, user, mapping, or key
-  metadata field is changed in the running Keycloak instance
+- **WHEN** a supported non-secret client, role, group, user, mapping, key, LLDAP
+  federation, or gateway field is changed in the running Keycloak instance
 - **THEN** drift conversion reports that exact runtime difference and emits a
   candidate based on the observation rather than an independently authored
   equivalent fixture
 
 #### Scenario: Drift includes secret-backed state
 
-- **WHEN** an observed user, client, administrator, TLS, database, or signing-key
-  resource requires secret material
+- **WHEN** an observed user, client, administrator, TLS, database, signing-key,
+  LLDAP bind, or gateway-cookie resource requires secret material
 - **THEN** the candidate contains an unresolved file-reference requirement,
   excludes secret bytes and hashes, and is marked incomplete and not activation
   ready
@@ -38,9 +40,10 @@ running services.
 The system SHALL read supported state from a running Keycloak administrative API
 and protocol endpoints and SHALL produce a deterministic declaration candidate
 for realms, clients, scopes, roles, groups, users, mappings, and public
-signing-key metadata. Capture SHALL distinguish local, federated, unmanaged,
-unsupported, ambiguous, and secret-backed state and SHALL NOT claim completeness
-when required state cannot be represented.
+signing-key metadata, supported LLDAP federation metadata, and bounded LLDAP
+administration-gateway metadata. Capture SHALL distinguish local, federated,
+unmanaged, unsupported, ambiguous, and secret-backed state and SHALL NOT claim
+completeness when required state cannot be represented.
 
 #### Scenario: External realm state is captured
 
@@ -51,8 +54,9 @@ when required state cannot be represented.
 
 #### Scenario: Unsupported state is encountered
 
-- **WHEN** capture encounters identity federation, custom providers, unknown
-  protocol mappers, external key storage, or another unsupported resource
+- **WHEN** capture encounters an unsupported identity federation, custom
+  provider, unknown protocol mapper, external key storage, unsupported LLDAP
+  mapping, or another unsupported resource
 - **THEN** it records an actionable finding, omits invented configuration, and
   marks the affected scope incomplete
 

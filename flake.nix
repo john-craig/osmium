@@ -195,12 +195,54 @@
           };
         in
         {
-          module-evaluation = (nixpkgs.lib.nixosSystem {
+           module-evaluation = (nixpkgs.lib.nixosSystem {
             inherit system;
             modules = guestModules;
-          }).config.system.build.toplevel;
+           }).config.system.build.toplevel;
 
-          persistence = import ./tests/persistence.nix {
+          lldap-module = import ./tests/lldap-module.nix {
+            inherit pkgs;
+            lib = nixpkgs.lib;
+            module = self.nixosModules.default;
+          };
+
+           lldap = import ./tests/lldap.nix {
+             inherit pkgs microvm;
+             lib = nixpkgs.lib;
+             module = self.nixosModules.default;
+           };
+
+           lldap-identities = import ./tests/lldap-identities.nix {
+             inherit pkgs microvm;
+             lib = nixpkgs.lib;
+             module = self.nixosModules.default;
+           };
+
+           lldap-identity-removal = import ./tests/lldap-identity-removal.nix {
+              inherit pkgs microvm;
+              lib = nixpkgs.lib;
+              module = self.nixosModules.default;
+            };
+
+           lldap-keycloak-federation = import ./tests/lldap-keycloak-federation.nix {
+             inherit pkgs microvm;
+             lib = nixpkgs.lib;
+             module = self.nixosModules.default;
+           };
+
+           lldap-drift-reverse-configuration = import ./tests/lldap-reverse-configuration.nix {
+             inherit pkgs microvm;
+             module = self.nixosModules.default;
+             mode = "drift";
+           };
+
+           lldap-live-capture-reverse-configuration = import ./tests/lldap-reverse-configuration.nix {
+             inherit pkgs microvm;
+             module = self.nixosModules.default;
+             mode = "live-capture";
+           };
+
+           persistence = import ./tests/persistence.nix {
             inherit pkgs;
             module = self.nixosModules.default;
           };

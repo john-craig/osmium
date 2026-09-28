@@ -9,6 +9,7 @@ let
   groups = lib.attrValues cfg.groups;
   clients = lib.attrValues cfg.clients;
   users = lib.attrValues cfg.users;
+  ldapFederations = lib.attrValues cfg.ldapFederations;
   passwordClient = lib.findFirst (client: client.public && builtins.elem "password" client.flows) null clients;
   stateDir = cfg.stateDir;
   ledger = "${stateDir}/.osmium-ledger.json";
@@ -63,6 +64,7 @@ let
         flows = client.flows;
         consentRequired = client.consentRequired;
         scopes = client.scopes;
+        includeGroupClaims = client.includeGroupClaims;
         realmRoles = client.realmRoles;
         clientRoles = client.clientRoles;
         secretFile = lib.optionalAttrs (!client.public) { unresolved = true; path = client.secretFile; };
@@ -84,11 +86,26 @@ let
         passwordFile = { unresolved = true; path = user.passwordFile; };
       })
       cfg.users;
+    ldapFederations = lib.mapAttrs
+      (_: federation: {
+        realm = federation.realm;
+        directory = federation.directory;
+        connectionUrl = federation.connectionUrl;
+        usersDn = federation.usersDn;
+        groupsDn = federation.groupsDn;
+        bindUser = federation.bindUser;
+        trustCertificateFile = federation.trustCertificateFile;
+        usernameAttribute = federation.usernameAttribute;
+        groupNameAttribute = federation.groupNameAttribute;
+        membershipAttribute = federation.membershipAttribute;
+        secretFile = { unresolved = true; path = federation.bindPasswordFile; };
+      })
+      cfg.ldapFederations;
   });
   signingKeys = cfg.signingKeys;
   reconciler = pkgs.writeShellScript "osmium-keycloak-reconcile" ''
      set -eu
-     PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq ]}
+     PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq pkgs.openldap pkgs.openssl ]}
     api=${lib.escapeShellArg "http://127.0.0.1:${toString cfg.httpPort}${cfg.httpPath}"}
     api=''${api%/}
     ledger=${lib.escapeShellArg ledger}
@@ -103,11 +120,13 @@ let
      install -d -m 0750 "$state"
      install -d -m 0700 "$runtime"
      if [ ! -e "$ledger" ]; then
-       printf '%s\n' '{"schema_version":2,"resources":{},"credentials":{"admin":null,"clients":{},"users":{}}}' > "$ledger"
+        printf '%s\n' '{"schema_version":3,"resources":{},"credentials":{"admin":null,"clients":{},"users":{},"federations":{}}}' > "$ledger"
        chown root:root "$ledger"
        chmod 0600 "$ledger"
      fi
-     jq -e '.schema_version == 2 and (.credentials | type == "object")' "$ledger" >/dev/null
+      jq -e '(.schema_version == 2 or .schema_version == 3) and (.credentials | type == "object")' "$ledger" >/dev/null
+      jq '.credentials.federations=(.credentials.federations // {})' "$ledger" > "$ledger.next"
+      chmod 0600 "$ledger.next"; chown root:root "$ledger.next"; mv -f "$ledger.next" "$ledger"
      new_salt() { od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; }
      fingerprint() { printf '%s%s' "$1" "$2" | sha256sum | cut -d ' ' -f 1; }
      record_fingerprint() {
@@ -167,10 +186,26 @@ let
        record_fingerprint admin admin "$admin_password" "$admin_salt"
      fi
     auth=(-H "Authorization: Bearer $token" -H 'Content-Type: application/json')
-    api_get() { curl --fail --silent --show-error "''${auth[@]}" "$1"; }
-    api_put() { curl --fail --silent --show-error "''${auth[@]}" -X PUT "$1" -d "$2" >/dev/null; }
-    api_post() { curl --fail --silent --show-error "''${auth[@]}" -X POST "$1" -d "$2" >/dev/null; }
-    ${lib.concatMapStringsSep "\n" (name: let realm = cfg.realms.${name}; in ''
+     api_get() { curl --fail --silent --show-error "''${auth[@]}" "$1"; }
+     api_put() { curl --fail --silent --show-error "''${auth[@]}" -X PUT "$1" -d "$2" >/dev/null; }
+      api_post() { curl --fail --silent --show-error "''${auth[@]}" -X POST "$1" -d "$2" >/dev/null; }
+     ${lib.concatMapStringsSep "\n" (name: let federation = cfg.ldapFederations.${name}; in ''
+       realm=${lib.escapeShellArg federation.realm}
+       component_name=${lib.escapeShellArg federation.name}
+       bind_password_file=${lib.escapeShellArg federation.bindPasswordFile}
+       [ -r "$bind_password_file" ] || { echo "Keycloak federation bind password file is unavailable for ${lib.escapeShellArg name}" >&2; exit 1; }
+       bind_password=$(cat "$bind_password_file")
+       [ -n "$bind_password" ] || { echo "Keycloak federation bind password is empty for ${lib.escapeShellArg name}" >&2; exit 1; }
+       components=$(api_get "$api/admin/realms/$realm/components?type=org.keycloak.storage.UserStorageProvider" 2>/dev/null || true)
+       [ -n "$components" ] || components='[]'
+       existing_component=$(jq -c --arg name "$component_name" '[.[] | select(.name == $name and .providerId == "ldap")] | if length == 1 then .[0] else empty end' <<<"$components")
+       component_id=$(jq -r '.id // empty' <<<"$existing_component")
+       if [ -n "$component_id" ]; then
+         payload=$(jq --arg value "$bind_password" '.config.bindCredential=[$value]' <<<"$existing_component")
+         api_put "$api/admin/realms/$realm/components/$component_id" "$payload"
+       fi
+     '') (lib.attrNames cfg.ldapFederations)}
+     ${lib.concatMapStringsSep "\n" (name: let realm = cfg.realms.${name}; in ''
        payload=$(jq -cn --arg realm ${lib.escapeShellArg realm.name} --arg display ${lib.escapeShellArg realm.displayName} --argjson enabled ${lib.boolToString realm.enabled} '{realm:$realm,displayName:$display,enabled:$enabled,verifyEmail:false}')
       status=$(curl --silent --output /dev/null --write-out '%{http_code}' "''${auth[@]}" "$api/admin/realms/${realm.name}")
       case "$status" in
@@ -209,9 +244,23 @@ let
       realm=${lib.escapeShellArg client.realm}
        payload=$(jq -cn --arg clientId ${lib.escapeShellArg client.clientId} --argjson enabled ${lib.boolToString client.enabled} --argjson publicClient ${lib.boolToString client.public} --argjson redirectUris ${lib.escapeShellArg (builtins.toJSON client.redirectUris)} --argjson webOrigins ${lib.escapeShellArg (builtins.toJSON client.webOrigins)} --arg protocol ${lib.escapeShellArg client.protocol} --argjson consentRequired ${lib.boolToString client.consentRequired} --argjson standardFlowEnabled ${lib.boolToString (builtins.elem "authorization-code" client.flows)} --argjson directAccessGrantsEnabled ${lib.boolToString (builtins.elem "password" client.flows)} --argjson serviceAccountsEnabled ${lib.boolToString (!client.public)} '{clientId:$clientId,enabled:$enabled,publicClient:$publicClient,redirectUris:$redirectUris,webOrigins:$webOrigins,protocol:$protocol,consentRequired:$consentRequired,standardFlowEnabled:$standardFlowEnabled,directAccessGrantsEnabled:$directAccessGrantsEnabled,serviceAccountsEnabled:$serviceAccountsEnabled}')
        existing=$(api_get "$api/admin/realms/$realm/clients" | jq -c --arg id ${lib.escapeShellArg client.clientId} '[.[] | select(.clientId == $id)] | if length == 1 then .[0] else empty end')
-       if [ -z "$existing" ]; then api_post "$api/admin/realms/$realm/clients" "$payload"; else api_put "$api/admin/realms/$realm/clients/$(jq -r .id <<<"$existing")" "$payload"; fi
-       existing=$(api_get "$api/admin/realms/$realm/clients" | jq -c --arg id ${lib.escapeShellArg client.clientId} '[.[] | select(.clientId == $id)] | if length == 1 then .[0] else empty end')
-       [ -n "$existing" ] || { echo "Keycloak client ${lib.escapeShellArg name} was not created" >&2; exit 1; }
+        if [ -z "$existing" ]; then api_post "$api/admin/realms/$realm/clients" "$payload"; else api_put "$api/admin/realms/$realm/clients/$(jq -r .id <<<"$existing")" "$payload"; fi
+        existing=$(api_get "$api/admin/realms/$realm/clients" | jq -c --arg id ${lib.escapeShellArg client.clientId} '[.[] | select(.clientId == $id)] | if length == 1 then .[0] else empty end')
+        [ -n "$existing" ] || { echo "Keycloak client ${lib.escapeShellArg name} was not created" >&2; exit 1; }
+        ${lib.optionalString client.includeGroupClaims ''
+          client_id=$(jq -r .id <<<"$existing")
+          mapper_name="${client.clientId}-groups"
+          mapper_payload=$(jq -cn --arg name "$mapper_name" '{name:$name,protocol:"openid-connect",protocolMapper:"oidc-group-membership-mapper",config:{"claim.name":"groups","jsonType.label":"String","multivalued":"true","full.path":"true","id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}')
+          mapper_components=$(api_get "$api/admin/realms/$realm/clients/$client_id/protocol-mappers/models" 2>/dev/null || true)
+          [ -n "$mapper_components" ] || mapper_components='[]'
+          mapper_id=$(jq -r --arg name "$mapper_name" '[.[] | select(.name == $name)] | if length == 1 then .[0].id else empty end' <<<"$mapper_components")
+          if [ -n "$mapper_id" ]; then
+            mapper_payload=$(jq --arg id "$mapper_id" '. + {id:$id}' <<<"$mapper_payload")
+            api_put "$api/admin/realms/$realm/clients/$client_id/protocol-mappers/models/$mapper_id" "$mapper_payload"
+          else
+            api_post "$api/admin/realms/$realm/clients/$client_id/protocol-mappers/models" "$mapper_payload"
+          fi
+        ''}
        ${lib.optionalString (!client.public) ''
          secret=$(cat ${lib.escapeShellArg client.secretFile})
          [ -n "$secret" ] || { echo "Keycloak client secret is empty for ${lib.escapeShellArg name}" >&2; exit 1; }
@@ -291,9 +340,89 @@ let
         role_json=$(api_get "$api/admin/realms/$realm/roles/${lib.escapeShellArg cfg.realmRoles.${roleName}.name}")
         api_post "$api/admin/realms/$realm/users/$user_id/role-mappings/realm" "[$role_json]"
       '') user.realmRoles}
-     '') (lib.attrNames cfg.users)}
+      '') (lib.attrNames cfg.users)}
+     ${lib.concatMapStringsSep "\n" (name: let federation = cfg.ldapFederations.${name}; in ''
+       realm=${lib.escapeShellArg federation.realm}
+       component_name=${lib.escapeShellArg federation.name}
+       bind_password_file=${lib.escapeShellArg federation.bindPasswordFile}
+       trust_certificate_file=${lib.escapeShellArg federation.trustCertificateFile}
+       [ -r "$bind_password_file" ] || { echo "Keycloak federation bind password file is unavailable for ${lib.escapeShellArg name}" >&2; exit 1; }
+        [ -r "$trust_certificate_file" ] || { echo "Keycloak federation trust certificate is unavailable for ${lib.escapeShellArg name}" >&2; exit 1; }
+        ${pkgs.openssl}/bin/openssl x509 -in "$trust_certificate_file" -noout >/dev/null || { echo "Keycloak federation trust certificate is invalid for ${lib.escapeShellArg name}" >&2; exit 1; }
+        bind_password=$(cat "$bind_password_file")
+        [ -n "$bind_password" ] || { echo "Keycloak federation bind password is empty for ${lib.escapeShellArg name}" >&2; exit 1; }
+        bind_password_tmp=$(mktemp "$runtime/federation-password.XXXXXX")
+        chmod 0400 "$bind_password_tmp"
+        printf '%s' "$bind_password" > "$bind_password_tmp"
+        LDAPTLS_CACERT="$trust_certificate_file" ldapsearch -x -H ${lib.escapeShellArg federation.connectionUrl} -D ${lib.escapeShellArg federation.bindDn} -y "$bind_password_tmp" -b ${lib.escapeShellArg federation.usersDn} -s base '(objectClass=*)' dn >/dev/null || {
+          rm -f "$bind_password_tmp"
+          echo "Keycloak federation bind credential or LDAPS trust validation failed for ${lib.escapeShellArg name}" >&2
+          exit 1
+        }
+        rm -f "$bind_password_tmp"
+       federation_record=$(jq -c --arg name ${lib.escapeShellArg name} '.resources.federations[$name] // empty' "$ledger")
+       components=$(api_get "$api/admin/realms/$realm/components?type=org.keycloak.storage.UserStorageProvider")
+       matches=$(jq -c --arg name "$component_name" '[.[] | select(.name == $name and .providerId == "ldap")]' <<<"$components")
+       [ "$(jq length <<<"$matches")" != 2 ] || { echo "Keycloak federation identity is ambiguous: ${lib.escapeShellArg name}" >&2; exit 1; }
+       if [ -z "$federation_record" ] && [ "$(jq length <<<"$matches")" = 1 ]; then
+         echo "Keycloak federation collides with an unmanaged component: ${lib.escapeShellArg name}" >&2
+         exit 1
+       fi
+       [ -n "$federation_record" ] && [ "$(jq -r '.providerId // empty' <<<"$federation_record")" = ldap ] || true
+       component_id=$(jq -r '.[0].id // empty' <<<"$matches")
+       realm_id=$(api_get "$api/admin/realms/$realm" | jq -r .id)
+       payload=$(jq -cn \
+          --arg name "$component_name" \
+          --arg parent "$realm_id" \
+         --arg url ${lib.escapeShellArg federation.connectionUrl} \
+         --arg users_dn ${lib.escapeShellArg federation.usersDn} \
+         --arg bind_dn ${lib.escapeShellArg federation.bindDn} \
+         --arg trust_certificate "$trust_certificate_file" \
+         --arg bind_credential "$bind_password" \
+         --arg username_attr ${lib.escapeShellArg federation.usernameAttribute} \
+         --arg group_attr ${lib.escapeShellArg federation.groupNameAttribute} \
+         --arg membership_attr ${lib.escapeShellArg federation.membershipAttribute} \
+         --argjson enabled true \
+          '{name:$name,parentId:$parent,providerId:"ldap",providerType:"org.keycloak.storage.UserStorageProvider",config:{enabled:[$enabled|tostring],priority:["0"],connectionUrl:[$url],usersDn:[$users_dn],authType:["simple"],bindDn:[$bind_dn],bindCredential:[$bind_credential],editMode:["READ_ONLY"],usernameLDAPAttribute:[$username_attr],rdnLDAPAttribute:[$username_attr],uuidLDAPAttribute:["uid"],userObjectClasses:["inetOrgPerson","posixAccount"],searchScope:["1"],pagination:["true"],syncRegistrations:["false"],fullSyncPeriod:["-1"],changedSyncPeriod:["-1"],cachePolicy:["NO_CACHE"],useTruststoreSpi:["always"],groupNameLDAPAttribute:[$group_attr],membershipLDAPAttribute:[$membership_attr],membershipAttributeType:["DN"],groupObjectClasses:["groupOfNames"]}}')
+        if [ -n "$component_id" ]; then
+          update_payload=$(jq 'del(.parentId)' <<<"$payload")
+          api_put "$api/admin/realms/$realm/components/$component_id" "$update_payload"
+       else
+         api_post "$api/admin/realms/$realm/components" "$payload"
+         component_id=$(api_get "$api/admin/realms/$realm/components?type=org.keycloak.storage.UserStorageProvider" | jq -r --arg name "$component_name" '.[] | select(.name == $name and .providerId == "ldap") | .id' | head -n 1)
+       fi
+        [ -n "$component_id" ] || { echo "Keycloak federation was not created: ${lib.escapeShellArg name}" >&2; exit 1; }
+        mapper_components=$(api_get "$api/admin/realms/$realm/components?type=org.keycloak.storage.ldap.mappers.LDAPStorageMapper" 2>/dev/null || true)
+        [ -n "$mapper_components" ] || mapper_components='[]'
+        mapper_name="''${component_name}-groups"
+        mapper_payload=$(jq -cn \
+          --arg name "$mapper_name" \
+          --arg parent "$component_id" \
+          --arg groups_dn ${lib.escapeShellArg federation.groupsDn} \
+          --arg group_attr ${lib.escapeShellArg federation.groupNameAttribute} \
+          --arg membership_attr ${lib.escapeShellArg federation.membershipAttribute} \
+           '{name:$name,parentId:$parent,providerId:"group-ldap-mapper",providerType:"org.keycloak.storage.ldap.mappers.LDAPStorageMapper",config:{"groups.dn":[$groups_dn],"group.name.ldap.attribute":[$group_attr],"group.object.classes":["groupOfNames"],"membership.ldap.attribute":[$membership_attr],"membership.user.ldap.attribute":["uid"],"membership.attribute.type":["DN"],mode:["READ_ONLY"],"preserve.group.inheritance":["false"]}}')
+        mapper_id=$(jq -r --arg name "$mapper_name" --arg parent "$component_id" '[.[] | select(.name == $name and .parentId == $parent and .providerId == "group-ldap-mapper")] | if length == 1 then .[0].id else empty end' <<<"$mapper_components")
+         if [ -n "$mapper_id" ]; then api_put "$api/admin/realms/$realm/components/$mapper_id" "$mapper_payload"; else
+           mapper_response=$(curl --silent --show-error --write-out '\n%{http_code}' "''${auth[@]}" -X POST "$api/admin/realms/$realm/components" -d "$mapper_payload")
+           mapper_status=$(tail -n 1 <<<"$mapper_response")
+           [ "$mapper_status" = 201 ] || { echo "Keycloak LDAP group mapper creation failed: $mapper_response" >&2; exit 1; }
+         fi
+         curl --fail --silent --show-error "''${auth[@]}" -X POST "$api/admin/realms/$realm/user-storage/$component_id/sync?action=triggerFullSync" >/dev/null
+         federation_salt=$(jq -r --arg name ${lib.escapeShellArg name} '.credentials.federations[$name].salt // empty' "$ledger")
+       [ -n "$federation_salt" ] || federation_salt=$(new_salt)
+       federation_fp=$(fingerprint "$federation_salt" "$bind_password")
+       recorded_federation_fp=$(jq -r --arg name ${lib.escapeShellArg name} '.credentials.federations[$name].fingerprint // empty' "$ledger")
+       if [ "$federation_fp" != "$recorded_federation_fp" ]; then
+         printf '%s' "$bind_password" > "$runtime/federation-${name}"
+         chmod 0400 "$runtime/federation-${name}"
+         record_fingerprint federations ${lib.escapeShellArg name} "$bind_password" "$federation_salt"
+       fi
+       jq --arg name ${lib.escapeShellArg name} --arg id "$component_id" '.resources.federations[$name]={id:$id,providerId:"ldap",status:"applied"}' "$ledger" > "$ledger.next"
+       chmod 0600 "$ledger.next"; mv -f "$ledger.next" "$ledger"
+     '') (lib.attrNames cfg.ldapFederations)}
      tmp=$(mktemp "$ledger.XXXXXX")
-     jq --argjson desired "$(cat "$desired")" '.schema_version=2 | .resources={desired:$desired,secret_values:"excluded",status:"applied"} | .credentials=(.credentials // {admin:null,clients:{},users:{}})' "$ledger" > "$tmp"
+      jq --argjson desired "$(cat "$desired")" '.schema_version=3 | .resources=(.resources // {}) | .resources.desired=$desired | .resources.secret_values="excluded" | .resources.status="applied" | .credentials=(.credentials // {admin:null,clients:{},users:{},federations:{}}) | .credentials.federations=(.credentials.federations // {})' "$ledger" > "$tmp"
      chmod 0600 "$tmp"; chown root:root "$tmp"; mv "$tmp" "$ledger"
   '';
   observe = pkgs.writeShellScriptBin "osmium-keycloak-observe" ''
@@ -317,11 +446,12 @@ let
     scopes_json=$(for realm in $(jq -r '.[].realm' <<<"$realms_json"); do curl --fail --silent --show-error "''${auth[@]}" "$api/admin/realms/$realm/client-scopes" | jq -c --arg realm "$realm" '.[] | {realm:$realm,name,protocol,attributes:(.attributes // {})}'; done | jq -sS 'sort_by([.realm,.name])')
     roles_json=$(for realm in $(jq -r '.[].realm' <<<"$realms_json"); do curl --fail --silent --show-error "''${auth[@]}" "$api/admin/realms/$realm/roles" | jq -c --arg realm "$realm" '.[] | {realm:$realm,name,description,composite}'; done | jq -sS 'sort_by([.realm,.name])')
     groups_json=$(for realm in $(jq -r '.[].realm' <<<"$realms_json"); do curl --fail --silent --show-error "''${auth[@]}" "$api/admin/realms/$realm/groups" | jq -c --arg realm "$realm" '.[] | {realm:$realm,id,name,path}'; done | jq -sS 'sort_by([.realm,.path])')
-    users_json=$(for realm in $(jq -r '.[].realm' <<<"$realms_json"); do curl --fail --silent --show-error "''${auth[@]}" "$api/admin/realms/$realm/users" | jq -c --arg realm "$realm" '.[] | {realm:$realm,id,username,enabled,email,firstName,lastName,emailVerified,federationLink:(.federationLink != null)}'; done | jq -sS 'sort_by([.realm,.username])')
-    keys_json=$(for realm in $(jq -r '.[].realm' <<<"$realms_json"); do curl --fail --silent --show-error "''${auth[@]}" "$api/realms/$realm/protocol/openid-connect/certs" | jq -c --arg realm "$realm" '.keys[] | {realm:$realm,kid,kty,alg,use,crv,n,e,x,y}'; done | jq -sS 'sort_by([.realm,.kid])')
-    report=$(jq -cnS --arg issuer ${lib.escapeShellArg cfg.issuer} --arg observed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      --argjson realms "$realms_json" --argjson clients "$clients_json" --argjson scopes "$scopes_json" --argjson roles "$roles_json" --argjson groups "$groups_json" --argjson users "$users_json" --argjson keys "$keys_json" \
-      '{schema_version:1,source:{origin:"runtime-observation",method:"keycloak-admin-api",review_only:true},observed_at:$observed_at,issuer:$issuer,complete:false,activation_ready:false,realms:$realms,clients:$clients,clientScopes:$scopes,realmRoles:$roles,groups:$groups,users:$users,keys:$keys,secrets:{excluded:true,unresolved:["admin.passwordFile","clients.*.secretFile","users.*.passwordFile","signingKeys.*.privateKeyFile"]},findings:["secret-file-reference-required","federated-and-external-users-unresolved"]}')
+     users_json=$(for realm in $(jq -r '.[].realm' <<<"$realms_json"); do curl --fail --silent --show-error "''${auth[@]}" "$api/admin/realms/$realm/users" | jq -c --arg realm "$realm" '.[] | {realm:$realm,id,username,enabled,email,firstName,lastName,emailVerified,federationLink:(.federationLink != null)}'; done | jq -sS 'sort_by([.realm,.username])')
+     keys_json=$(for realm in $(jq -r '.[].realm' <<<"$realms_json"); do curl --fail --silent --show-error "''${auth[@]}" "$api/realms/$realm/protocol/openid-connect/certs" | jq -c --arg realm "$realm" '.keys[] | {realm:$realm,kid,kty,alg,use,crv,n,e,x,y}'; done | jq -sS 'sort_by([.realm,.kid])')
+     ldap_json=$(for realm in $(jq -r '.[].realm' <<<"$realms_json"); do curl --fail --silent --show-error "''${auth[@]}" "$api/admin/realms/$realm/components?type=org.keycloak.storage.UserStorageProvider" | jq -c --arg realm "$realm" '.[] | select(.providerId == "ldap") | {realm:$realm,name,providerId,config:{enabled:(.config.enabled // []),connectionUrl:(.config.connectionUrl // []),usersDn:(.config.usersDn // []),bindDn:(.config.bindDn // []),usernameLDAPAttribute:(.config.usernameLDAPAttribute // []),groupNameLDAPAttribute:(.config.groupNameLDAPAttribute // []),membershipLDAPAttribute:(.config.membershipLDAPAttribute // []),useTruststoreSpi:(.config.useTruststoreSpi // []),editMode:(.config.editMode // [])},secrets:{bindPasswordFile:{unresolved:true},trustCertificateFile:{unresolved:true}}}'; done | jq -sS 'sort_by([.realm,.name])')
+     report=$(jq -cnS --arg issuer ${lib.escapeShellArg cfg.issuer} --arg observed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+       --argjson realms "$realms_json" --argjson clients "$clients_json" --argjson scopes "$scopes_json" --argjson roles "$roles_json" --argjson groups "$groups_json" --argjson users "$users_json" --argjson keys "$keys_json" --argjson ldapFederations "$ldap_json" \
+       '{schema_version:2,source:{origin:"runtime-observation",method:"keycloak-admin-api",review_only:true},provenance:{observed_fields:["realms","clients","users","ldapFederations"],secret_policy:"secret-bytes-excluded"},observed_at:$observed_at,issuer:$issuer,complete:false,activation_ready:false,realms:$realms,clients:$clients,clientScopes:$scopes,realmRoles:$roles,groups:$groups,users:$users,keys:$keys,ldapFederations:$ldapFederations,lldapGateway:{unresolved:true,reason:"gateway-is-observed-by-lldap-runtime"},secrets:{excluded:true,unresolved:["admin.passwordFile","clients.*.secretFile","users.*.passwordFile","ldapFederations.*.bindPasswordFile","ldapFederations.*.trustCertificateFile","signingKeys.*.privateKeyFile","lldapGateway.*"]},findings:["secret-file-reference-required","federated-and-external-users-unresolved","lldap-gateway-metadata-requires-lldap-observation"]}')
     if [ -n "$output" ]; then install -d -m 0750 "$(dirname "$output")"; printf '%s\n' "$report" > "$output"; else printf '%s\n' "$report"; fi
   '';
   candidate = pkgs.writeShellScriptBin "osmium-keycloak-candidate" ''
@@ -333,12 +463,13 @@ let
       . as $o |
       ($o.realms | map({key:(.realm | gsub("[^A-Za-z0-9._-]"; "_")),value:{name:.realm,enabled:.enabled,displayName:(.displayName // .realm)}}) | from_entries) as $realms |
       ($o.clients | map({key:key("client"; (.realm + "_" + .clientId)),value:{realm:.realm,clientId:.clientId,enabled:.enabled,public:.publicClient,protocol:.protocol,redirectUris:.redirectUris,webOrigins:.webOrigins,secretFile:{unresolved:true}}}) | from_entries) as $clients |
-      ($o.users | map({key:key("user"; (.realm + "_" + (.username // ""))),value:{realm:.realm,username:.username,enabled:.enabled,email:(.email // ""),firstName:(.firstName // ""),lastName:(.lastName // ""),passwordFile:{unresolved:true}}}) | from_entries) as $users |
-      {schema_version:1,complete:false,activation_ready:false,
+       ($o.users | map({key:key("user"; (.realm + "_" + (.username // ""))),value:{realm:.realm,username:.username,enabled:.enabled,email:(.email // ""),firstName:(.firstName // ""),lastName:(.lastName // ""),passwordFile:{unresolved:true}}}) | from_entries) as $users |
+        ($o.ldapFederations | map({key:key("ldap"; (.realm + "_" + .name)),value:{realm:.realm,name:.name,directory:"lldap",connectionUrl:(.config.connectionUrl[0] // ""),usersDn:(.config.usersDn[0] // ""),groupsDn:(.config.groupsDn[0] // ""),bindDn:(.config.bindDn[0] // ""),usernameAttribute:(.config.usernameLDAPAttribute[0] // "uid"),groupNameAttribute:(.config.groupNameLDAPAttribute[0] // "cn"),membershipAttribute:(.config.membershipLDAPAttribute[0] // "member"),bindPasswordFile:{unresolved:true},trustCertificateFile:{unresolved:true}}}) | from_entries) as $ldap |
+       {schema_version:1,complete:false,activation_ready:false,
        provenance:(($o.source // {}) + {conversion:"review-only",observed_at:$o.observed_at}),
-       declaration:{services:{osmium:{keycloak:{issuer:($o.issuer),realms:$realms,clients:$clients,users:$users}}}},
+       declaration:{services:{osmium:{keycloak:{issuer:($o.issuer),realms:$realms,clients:$clients,users:$users,ldapFederations:$ldap}}}},
        secrets:{excluded:true},unresolved:["admin.passwordFile","clients.*.secretFile","users.*.passwordFile","signingKeys.*.privateKeyFile"],
-       findings:(($o.findings // []) + ["operator_review_required"] + (if any($o.users[]?; .federationLink == true) then ["federated-user-state-unsupported"] else [] end))}' "$2"
+       findings:(($o.findings // []) + ["operator_review_required","lldap-gateway-metadata-unresolved"] + (if any($o.users[]?; .federationLink == true) then ["federated-user-state-unsupported"] else [] end))}' "$2"
   '';
 in
 {
@@ -436,7 +567,8 @@ in
           protocol = lib.mkOption { type = lib.types.enum [ "openid-connect" "saml" ]; default = "openid-connect"; description = "Client protocol."; };
           flows = lib.mkOption { type = lib.types.listOf (lib.types.enum [ "authorization-code" "password" ]); default = [ "authorization-code" ]; description = "Supported authentication flows."; };
           consentRequired = lib.mkOption { type = lib.types.bool; default = false; description = "Require user consent."; };
-          scopes = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; description = "Assigned client scopes."; };
+           scopes = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; description = "Assigned client scopes."; };
+           includeGroupClaims = lib.mkOption { type = lib.types.bool; default = false; description = "Include federated and local group paths in OIDC tokens."; };
           realmRoles = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; description = "Realm roles assigned to the client."; };
           clientRoles = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; description = "Client roles assigned to the client."; };
         };
@@ -463,6 +595,27 @@ in
       default = { };
       description = "Declarative local users.";
     };
+    ldapFederations = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.submodule ({ name, ... }: {
+        options = {
+          name = lib.mkOption { type = lib.types.strMatching "[A-Za-z0-9._-]+"; default = name; description = "Stable Keycloak LDAP provider name."; };
+          realm = lib.mkOption { type = lib.types.str; description = "Declared realm key."; };
+          directory = lib.mkOption { type = lib.types.enum [ "lldap" ]; default = "lldap"; description = "Managed directory reference."; };
+          connectionUrl = lib.mkOption { type = lib.types.strMatching "ldaps://[^[:space:]]+"; description = "Verified LDAPS endpoint."; };
+           usersDn = lib.mkOption { type = lib.types.strMatching "ou=[A-Za-z0-9._-]+,dc=[A-Za-z0-9._=-]+(,dc=[A-Za-z0-9._=-]+)*"; description = "LDAP users search base."; };
+           groupsDn = lib.mkOption { type = lib.types.strMatching "ou=[A-Za-z0-9._-]+,dc=[A-Za-z0-9._=-]+(,dc=[A-Za-z0-9._=-]+)*"; description = "LDAP groups search base for the managed group mapper."; };
+          bindDn = lib.mkOption { type = lib.types.strMatching "uid=[A-Za-z0-9._-]+,ou=people,dc=[A-Za-z0-9._=-]+(,dc=[A-Za-z0-9._=-]+)*"; description = "Dedicated LDAP bind DN."; };
+          bindUser = lib.mkOption { type = lib.types.strMatching "[A-Za-z0-9._-]+"; description = "LLDAP consumer bind-user declaration key."; };
+          bindPasswordFile = lib.mkOption { type = lib.types.path; description = "Runtime bind-password file."; };
+          trustCertificateFile = lib.mkOption { type = lib.types.path; description = "Runtime CA certificate used to trust LDAPS."; };
+          usernameAttribute = lib.mkOption { type = lib.types.enum [ "uid" ]; default = "uid"; description = "Supported LDAP username attribute."; };
+          groupNameAttribute = lib.mkOption { type = lib.types.enum [ "cn" ]; default = "cn"; description = "Supported LDAP group-name attribute."; };
+          membershipAttribute = lib.mkOption { type = lib.types.enum [ "member" ]; default = "member"; description = "Supported LDAP group membership attribute."; };
+        };
+      }));
+      default = { };
+      description = "Managed LLDAP federation providers, one per realm.";
+    };
     reverseConfiguration.enable = lib.mkEnableOption "review-only Keycloak observation tooling";
     removalPolicy = lib.mkOption { type = lib.types.enum [ "retain" "disable" "delete" ]; default = "retain"; description = "Default policy for managed resources removed from declarations."; };
     signingKeys = lib.mkOption { type = lib.types.attrsOf lib.types.attrs; default = { }; description = "Public metadata for signing-key declarations; private material is not evaluated."; };
@@ -482,6 +635,13 @@ in
       { assertion = lib.all (role: builtins.hasAttr role.realm cfg.realms && builtins.hasAttr role.client cfg.clients) clientRoles; message = "Keycloak client roles must reference declared realms and clients."; }
       { assertion = lib.all (group: builtins.hasAttr group.realm cfg.realms && lib.all (role: builtins.hasAttr role cfg.realmRoles) group.realmRoles) groups; message = "Keycloak groups must reference declared realms and realm roles."; }
       { assertion = lib.all (user: lib.all (group: builtins.hasAttr group cfg.groups) user.groups && lib.all (role: builtins.hasAttr role cfg.realmRoles) user.realmRoles) users; message = "Keycloak user mappings must reference declared groups and realm roles."; }
+      { assertion = lib.all (federation: builtins.hasAttr federation.realm cfg.realms) ldapFederations; message = "Keycloak LDAP federations must reference declared realms."; }
+      { assertion = lib.length (lib.unique (map (federation: federation.realm) ldapFederations)) == lib.length ldapFederations; message = "Only one managed LLDAP federation is allowed per realm."; }
+      { assertion = lib.all (federation: federation.directory == "lldap" && config.services.osmium.lldap.enable) ldapFederations; message = "Keycloak LDAP federation requires the managed LLDAP service."; }
+      { assertion = lib.all (federation: federation.trustCertificateFile != federation.bindPasswordFile && !lib.hasPrefix "/nix/store/" (toString federation.trustCertificateFile) && !lib.hasPrefix "/nix/store/" (toString federation.bindPasswordFile)) ldapFederations; message = "Keycloak LDAP trust and bind inputs must be distinct runtime files outside the Nix store."; }
+      { assertion = lib.all (federation: builtins.hasAttr federation.bindUser config.services.osmium.lldap.users && config.services.osmium.lldap.users.${federation.bindUser}.consumer == "keycloak") ldapFederations; message = "Keycloak LDAP federations must reference a dedicated keycloak consumer bind user."; }
+      { assertion = lib.all (federation: builtins.hasAttr federation.bindUser config.services.osmium.lldap.users && federation.bindDn == "uid=${config.services.osmium.lldap.users.${federation.bindUser}.username},ou=people,${config.services.osmium.lldap.baseDn}") ldapFederations; message = "Keycloak LDAP bindDn must match the referenced managed LLDAP consumer user."; }
+      { assertion = lib.all (federation: config.services.osmium.lldap.ldaps.enable && lib.hasPrefix "ldaps://" federation.connectionUrl) ldapFederations; message = "Keycloak LDAP federation only permits verified LDAPS endpoints."; }
       { assertion = lib.all (client: client.protocol == "openid-connect") clients; message = "Only OpenID Connect clients are supported by Osmium Keycloak."; }
       { assertion = lib.all (client: lib.all (uri: !(lib.hasInfix "*" uri)) client.redirectUris) clients; message = "Keycloak redirect URIs must not contain wildcards."; }
       { assertion = lib.all (client: client.public || client.secretFile != null) clients; message = "Every confidential Keycloak client requires a runtime secretFile."; }
@@ -499,6 +659,8 @@ in
         http-port = cfg.httpPort;
         http-relative-path = cfg.httpPath;
         hostname = cfg.issuer;
+      } // lib.optionalAttrs (ldapFederations != [ ]) {
+        truststore-paths = lib.concatStringsSep "," (map (federation: federation.trustCertificateFile) ldapFederations);
       };
     };
     systemd.services.osmium-keycloak-bootstrap-env = {
@@ -531,12 +693,12 @@ in
     systemd.services.osmium-keycloak-reconcile = {
       description = "Reconcile declarative Osmium Keycloak state";
       wantedBy = [ "multi-user.target" ];
-      after = [ "keycloak.service" ];
-      requires = [ "keycloak.service" ];
+      after = [ "keycloak.service" ] ++ lib.optional (ldapFederations != [ ]) "osmium-lldap-reconcile.service";
+      requires = [ "keycloak.service" ] ++ lib.optional (ldapFederations != [ ]) "osmium-lldap-reconcile.service";
       path = [ pkgs.curl pkgs.jq pkgs.coreutils ];
       serviceConfig = { Type = "oneshot"; User = "root"; RemainAfterExit = true; ExecStart = reconciler; };
     };
-    systemd.paths.osmium-keycloak-reconcile = { wantedBy = [ "multi-user.target" ]; pathConfig = { PathChanged = [ cfg.admin.passwordFile ] ++ lib.concatMap (client: lib.optional (!client.public) client.secretFile) clients ++ map (user: user.passwordFile) users; Unit = "osmium-keycloak-reconcile.service"; }; };
+     systemd.paths.osmium-keycloak-reconcile = { wantedBy = [ "multi-user.target" ]; pathConfig = { PathChanged = [ cfg.admin.passwordFile ] ++ lib.concatMap (client: lib.optional (!client.public) client.secretFile) clients ++ map (user: user.passwordFile) users ++ lib.concatMap (federation: [ federation.bindPasswordFile federation.trustCertificateFile ]) ldapFederations; Unit = "osmium-keycloak-reconcile.service"; }; };
   } // lib.optionalAttrs (options ? microvm) {
     microvm.forwardPorts = [{ from = "host"; proto = "tcp"; host.port = cfg.hostHttpPort; guest.port = cfg.httpPort; }];
     networking.firewall.allowedTCPPorts = [ cfg.httpPort ];

@@ -1,3 +1,8 @@
+> **Status: Superseded.** This unfinished proposal is superseded by
+> `add-lldap-service` because the FreeIPA package adaptation and Dogtag
+> bootstrap remain blocked. It is retained as historical planning context and
+> must not be applied or enabled.
+
 ## Why
 
 Osmium needs a shared standards-based identity directory for services that use

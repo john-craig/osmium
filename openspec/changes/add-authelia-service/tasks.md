@@ -31,8 +31,15 @@
 ## 5. Documentation And Completion
 
 - [ ] 5.1 Add `docs/authelia.md` covering local users, runtime secret deployment, password rotation, TOTP bootstrap, SQLite single-instance limits, access-control rules, required external TLS/forwarded headers, no-bundled-proxy boundary, recovery, and unsupported capabilities; verify all documented option names match evaluated module options.
-- [ ] 5.2 Add flake outputs for the base, identities, proxy authorization, drift, and live-capture checks; verify every named check boots and exercises Authelia in a MicroVM rather than only evaluating a system closure.
+- [ ] 5.2 Add flake outputs for the base, identities, proxy authorization, LLDAP authentication, drift, and live-capture checks; verify every named check boots and exercises Authelia in a MicroVM rather than only evaluating a system closure.
 - [ ] 5.3 Run `nix fmt` and `git diff --check`; verify formatting and whitespace checks pass.
 - [ ] 5.4 Run `openspec validate add-authelia-service --strict`; verify the proposal, design, all four delta specs, and task list pass strict validation.
-- [ ] 5.5 Run `nix flake check --no-build --no-update-lock-file`; verify the Authelia module and every new check derivation evaluate successfully.
-- [ ] 5.6 Execute and report `nix build .#checks.x86_64-linux.authelia --print-build-logs`, `nix build .#checks.x86_64-linux.authelia-identities --print-build-logs`, `nix build .#checks.x86_64-linux.authelia-proxy-authorization --print-build-logs`, `nix build .#checks.x86_64-linux.authelia-drift-reverse-configuration --print-build-logs`, and `nix build .#checks.x86_64-linux.authelia-live-capture-reverse-configuration --print-build-logs`; verify each required lifecycle, authentication, proxy, rotation, TOTP, persistence, and reverse-configuration behavior passes in a booting MicroVM.
+- [ ] 5.5 Run `nix flake check --no-build --no-update-lock-file`; verify the Authelia module, LLDAP integration, and every new check derivation evaluate successfully.
+- [ ] 5.6 Execute and report `nix build .#checks.x86_64-linux.authelia --print-build-logs`, `nix build .#checks.x86_64-linux.authelia-identities --print-build-logs`, `nix build .#checks.x86_64-linux.authelia-proxy-authorization --print-build-logs`, `nix build .#checks.x86_64-linux.lldap-authelia-ldap-authentication --print-build-logs`, `nix build .#checks.x86_64-linux.authelia-drift-reverse-configuration --print-build-logs`, and `nix build .#checks.x86_64-linux.authelia-live-capture-reverse-configuration --print-build-logs`; verify each required lifecycle, authentication, proxy, LLDAP integration, rotation, TOTP, persistence, and reverse-configuration behavior passes in a booting MicroVM.
+
+## 6. LLDAP Integration
+
+- [ ] 6.1 Provision separate restricted LLDAP bind users for Keycloak and Authelia, each with independent runtime rotation; verify consumers cannot use the LLDAP administrator credential and rotation does not affect the other consumer.
+- [ ] 6.2 Apply or depend on the completed `add-lldap-service` base module, then add typed LLDAP backend, mapping, trust, and bind-password declarations; verify LDAP mode rejects insecure endpoints, unsafe filters, unavailable LLDAP, and invalid trust.
+- [ ] 6.3 Implement Authelia's explicit file-to-LDAP backend transition and rollback without migrating or mutating credentials; verify LLDAP mode denies file-only users and explicit disablement restores the retained file backend.
+- [ ] 6.4 Add and execute `nix build .#checks.x86_64-linux.lldap-authelia-ldap-authentication --print-build-logs`; verify booting LLDAP and Authelia MicroVMs exercise LDAP login, group authorization, bind rotation, trust denial, file-only denial, and rollback.
