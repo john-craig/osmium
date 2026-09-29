@@ -25,14 +25,17 @@ to an external proxy.
   observable through live MicroVM behavior.
 - Provide generic, standard proxy authorization without taking ownership of the
   public proxy or application routes.
+- Provide an explicit LLDAP backend integration with strict trust validation,
+  dedicated bind credentials, and an explicit rollback to the retained local
+  YAML backend.
 - Derive review-only reverse declarations from observed runtime state.
 
 **Non-Goals:**
 
 - Keycloak federation, shared users, SSO gateway composition, or any other
   relationship with the existing Keycloak service.
-- Authelia OpenID Connect provider/client configuration, LDAP, Duo, WebAuthn,
-  password reset delivery, or a highly available database/cache architecture.
+- Authelia OpenID Connect provider/client configuration, Duo, WebAuthn, password
+  reset delivery, or a highly available database/cache architecture.
 - Service-owned TLS certificates, public listeners, Nginx virtual hosts,
   application upstreams, or trusted-header SSO configuration.
 - Rotation, export, capture, or recovery of an existing TOTP secret.
@@ -106,6 +109,18 @@ an insecure public URL. No certificate or key options will be exposed by the
 service. Tests can represent the external TLS hop through loopback forwarded
 headers; this validates Authelia's authorization semantics without pretending
 the MicroVM owns public TLS.
+
+### Integrate LLDAP as an explicit authentication backend
+
+The module will support a typed LLDAP backend only when the selected LLDAP
+service is enabled and its directory endpoint, base DN, search mappings, trust
+input, and dedicated bind-password file are valid. Bind credentials are
+separate from the LLDAP administrator and Keycloak consumer credentials, and
+their changed secret files trigger validated runtime rotation. LDAP mode is an
+explicit transition: the retained YAML backend remains available for rollback,
+but file-only users are not accepted while LDAP mode is active. Disabling LDAP
+mode restores the retained YAML backend without migrating or mutating its
+credentials.
 
 ### Observe runtime state and make candidates review-only
 

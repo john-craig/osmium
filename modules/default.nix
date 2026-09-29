@@ -8,6 +8,7 @@
     ./services/opencode-server.nix
     ./services/keycloak.nix
     ./services/lldap.nix
+    ./services/authelia.nix
     ./services/traefik.nix
     ./compatibility.nix
   ];

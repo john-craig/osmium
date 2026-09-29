@@ -200,7 +200,7 @@
             modules = guestModules;
            }).config.system.build.toplevel;
 
-          lldap-module = import ./tests/lldap-module.nix {
+           lldap-module = import ./tests/lldap-module.nix {
             inherit pkgs;
             lib = nixpkgs.lib;
             module = self.nixosModules.default;
@@ -211,6 +211,44 @@
              lib = nixpkgs.lib;
              module = self.nixosModules.default;
            };
+
+           authelia-module = import ./tests/authelia-module.nix {
+             inherit pkgs;
+             lib = nixpkgs.lib;
+             module = self.nixosModules.default;
+           };
+
+            authelia = import ./tests/authelia.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+            };
+
+            authelia-identities = import ./tests/authelia-identities.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+            };
+
+             authelia-proxy-authorization = import ./tests/authelia-proxy-authorization.nix {
+               inherit pkgs microvm;
+               module = self.nixosModules.default;
+             };
+
+             authelia-drift-reverse-configuration = import ./tests/authelia-reverse-configuration.nix {
+               inherit pkgs microvm;
+               module = self.nixosModules.default;
+               mode = "drift";
+             };
+
+             authelia-live-capture-reverse-configuration = import ./tests/authelia-reverse-configuration.nix {
+               inherit pkgs microvm;
+               module = self.nixosModules.default;
+               mode = "live-capture";
+             };
+
+             lldap-authelia-ldap-authentication = import ./tests/lldap-authelia-ldap-authentication.nix {
+               inherit pkgs microvm;
+               module = self.nixosModules.default;
+             };
 
            lldap-identities = import ./tests/lldap-identities.nix {
              inherit pkgs microvm;
