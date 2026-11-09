@@ -195,13 +195,28 @@
           osmium-rebrand-migration = rebrand.osmium-rebrand-migration;
         });
 
-      devShells = forAllSystems (system: {
-        default = nixpkgs.legacyPackages.${system}.mkShell {
-          packages = with nixpkgs.legacyPackages.${system}; [
-            nixpkgs-fmt
-          ];
-        };
-      });
+      devShells = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          snapshot = pkgs.writeShellApplication {
+            name = "osmium-filesystem-snapshot";
+            runtimeInputs = [ pkgs.python3 ];
+            text = ''exec python ${./tools/filesystem_snapshot.py} "$@"'';
+          };
+          capture = pkgs.writeShellApplication {
+            name = "osmium-gitea-remote";
+            runtimeInputs = [ pkgs.python3 ];
+            text = ''exec python ${./tools/remote_gitea_capture.py} "$@"'';
+          };
+        in {
+          default = pkgs.mkShell {
+            packages = [ pkgs.nixpkgs-fmt snapshot capture ];
+            shellHook = ''
+              echo "Osmium development shell"
+              echo "Commands: osmium-filesystem-snapshot --help, osmium-gitea-remote --help, nixpkgs-fmt --help"
+            '';
+          };
+        });
 
       formatter = forAllSystems (system:
         nixpkgs.legacyPackages.${system}.nixpkgs-fmt);

@@ -4,3 +4,7 @@ result-*
 *.qcow2
 *.raw
 *.img
+.clinotes/
+opencode.json
+.opencode/opencode.json
+.opencode/skills/project-subagent-management

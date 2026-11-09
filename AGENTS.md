@@ -1,5 +1,8 @@
 # Agent Instructions
 
+When the Clinotes MCP is available, record decisions, lessons learned, and
+emergent patterns in Clinotes.
+
 ## New Service Specifications
 
 When proposing an OpenSpec change that adds a new service, always include an
