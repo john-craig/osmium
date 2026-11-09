@@ -1,0 +1,3 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.osmium.actiontest" android:versionCode="1" android:versionName="1.0">
+  <application android:label="Osmium Action Test" android:hasCode="false" />
+</manifest>

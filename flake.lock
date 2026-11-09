@@ -3,6 +3,26 @@
     "home-manager": {
       "inputs": {
         "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1789482455,
+        "narHash": "sha256-pD3qVlQ4mUCFoTWrYtxecpSitQMsgJvJIN0FUIDZoEU=",
+        "owner": "nix-community",
+        "repo": "home-manager",
+        "rev": "efa3ccb4c3cc90d832eab232976379058fa75aa3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "home-manager",
+        "type": "github"
+      }
+    },
+    "home-manager_2": {
+      "inputs": {
+        "nixpkgs": [
           "impermanence",
           "nixpkgs"
         ]
@@ -23,7 +43,7 @@
     },
     "impermanence": {
       "inputs": {
-        "home-manager": "home-manager",
+        "home-manager": "home-manager_2",
         "nixpkgs": [
           "nixpkgs"
         ]
@@ -79,11 +99,75 @@
         "type": "github"
       }
     },
+    "opencode": {
+      "inputs": {
+        "nixpkgs": [
+          "opencode-nix",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1771626013,
+        "narHash": "sha256-b74ascBNcHlXjhxRX4FgqQXJTpcYhika5ay+fx1eX90=",
+        "owner": "anomalyco",
+        "repo": "opencode",
+        "rev": "f07e8772042d9980bf6b6912d20b59709cbccd51",
+        "type": "github"
+      },
+      "original": {
+        "owner": "anomalyco",
+        "repo": "opencode",
+        "type": "github"
+      }
+    },
+    "opencode-mcp-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1789550803,
+        "narHash": "sha256-oceP/i71IbqqZA1wTpovBjUEaopzRfbp2eMLmJv4NC8=",
+        "owner": "AlaeddineMessadi",
+        "repo": "opencode-mcp",
+        "rev": "6f1f62fd6c151377e09f4fe95bed58eb48c6196b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "AlaeddineMessadi",
+        "repo": "opencode-mcp",
+        "rev": "6f1f62fd6c151377e09f4fe95bed58eb48c6196b",
+        "type": "github"
+      }
+    },
+    "opencode-nix": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "opencode": "opencode",
+        "systems": "systems",
+        "treefmt-nix": "treefmt-nix"
+      },
+      "locked": {
+        "lastModified": 1771719369,
+        "narHash": "sha256-IVcbOErLwI4vQ3berLgQNhAOVax+KKRhuOj50QY2k3E=",
+        "owner": "albertov",
+        "repo": "opencode-nix",
+        "rev": "57517849bb2cfdff854bfbb2b61cb9694ef906f8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "albertov",
+        "repo": "opencode-nix",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
+        "home-manager": "home-manager",
         "impermanence": "impermanence",
         "microvm": "microvm",
         "nixpkgs": "nixpkgs",
+        "opencode-mcp-src": "opencode-mcp-src",
+        "opencode-nix": "opencode-nix",
         "sops-nix": "sops-nix"
       }
     },
@@ -121,6 +205,42 @@
       "original": {
         "type": "git",
         "url": "https://spectrum-os.org/git/spectrum"
+      }
+    },
+    "systems": {
+      "locked": {
+        "lastModified": 1681028828,
+        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
+        "owner": "nix-systems",
+        "repo": "default",
+        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-systems",
+        "repo": "default",
+        "type": "github"
+      }
+    },
+    "treefmt-nix": {
+      "inputs": {
+        "nixpkgs": [
+          "opencode-nix",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1770228511,
+        "narHash": "sha256-wQ6NJSuFqAEmIg2VMnLdCnUc0b7vslUohqqGGD+Fyxk=",
+        "owner": "numtide",
+        "repo": "treefmt-nix",
+        "rev": "337a4fe074be1042a35086f15481d763b8ddc0e7",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "treefmt-nix",
+        "type": "github"
       }
     }
   },

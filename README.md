@@ -5,9 +5,179 @@ tested with impermanent guest filesystems.
 
 ## Status
 
-The project contains a small native NixOS HTTP service, Gitea integration, and
-filesystem snapshot workflows. They verify that declared state survives a
-reboot while the guest root filesystem is recreated.
+The project contains a small native NixOS HTTP service, Gitea and Gotify
+integrations, and filesystem snapshot workflows. They verify that declared
+state survives a reboot while the guest root filesystem is recreated.
+
+## OpenCode Server
+
+The OpenCode server is disabled by default and runs as a locked, lingering
+`opencode` user through Home Manager. Credentials are supplied at runtime in a
+host-prepared directory; the MicroVM mounts that directory read-only and keeps
+it outside persistence. A complete declaration is:
+
+```nix
+services.osmium.opencodeServer = {
+  enable = true;
+  listenAddress = "0.0.0.0";
+  hostPort = 44096;
+  credentials.hostDirectory = "/run/secrets/opencode";
+  workspaces.project = {
+    hostPath = "/srv/opencode/project";
+    guestPath = "/var/lib/opencode/workspace/project";
+    readOnly = false;
+  };
+};
+```
+
+The host directory must be private (normally `0700`) and contain non-empty
+`server.env` with `OPENCODE_SERVER_PASSWORD` plus valid provider `auth.json`.
+Materialize `/run/secrets/opencode/{server.env,auth.json}` from `sops-nix` or
+another runtime secret manager in a host activation service, then declare
+`credentials.hostDirectory` as above. Do not use Nix `text` for secret values.
+Provider authentication is bootstrapped atomically into persistent OpenCode
+state and valid changed files rotate on the next reconciliation. Invalid
+replacements leave the last valid provider auth in place and fail readiness.
+The HTTP password is reloaded by restarting the user service; old credentials
+stop working after a valid rotation.
+
+Profiles, skills, and MCP servers can be declared together. Profile rules are
+ordered, skill sources are immutable, and MCP credentials are resolved only at
+runtime:
+
+```nix
+services.osmium.opencodeServer = {
+  enable = true;
+  skills.facts.path = ./skills/facts;
+  mcpServers.facts = {
+    type = "local";
+     command = [ "/usr/local/libexec/facts-mcp" ];
+    environment.MCP_TOKEN = "{env:MCP_TOKEN}";
+  };
+  mcpServers.remote = {
+    type = "remote";
+    url = "https://mcp.example.invalid/endpoint";
+    headers.Authorization = "{env:MCP_AUTHORIZATION}";
+  };
+  profiles.facts = {
+    model = "anthropic/claude-sonnet";
+    rules = [ "Use verified facts." "Cite the source of each result." ];
+    ruleFiles = [ ./rules/facts.md ];
+    skills = [ "facts" ];
+    mcpServers = [ "facts" ];
+    permissions.read = "allow";
+  };
+};
+```
+
+Create a session first, then select the profile on the message request. A later
+message may explicitly switch to another enabled profile:
+
+```sh
+curl --user opencode:PASSWORD -X POST http://127.0.0.1:4096/session -d '{}' \
+  | jq -r .id > /tmp/session
+curl --user opencode:PASSWORD -H 'Content-Type: application/json' \
+  -X POST "http://127.0.0.1:4096/session/$(cat /tmp/session)/message" \
+  -d '{"agent":"facts","parts":[{"type":"text","text":"Summarize the facts"}]}'
+```
+
+Changing `MCP_TOKEN` in the mounted environment file restarts the service and
+the next MCP call consumes the replacement. Capture and drift commands include
+profile state, omit secret values, and remain review-only. Profile-specific
+checks are:
+
+```sh
+nix build .#checks.x86_64-linux.opencode-server-profiles --print-build-logs
+nix build .#checks.x86_64-linux.opencode-server-profiles-drift-reverse-configuration --print-build-logs
+nix build .#checks.x86_64-linux.opencode-server-profiles-live-capture-reverse-configuration --print-build-logs
+```
+
+To switch an existing session, send the next message with another enabled
+profile name. The server rejects unknown, disabled, or removed names; it never
+silently maps them to a different profile:
+
+```sh
+curl --user opencode:PASSWORD -H 'Content-Type: application/json' \
+  -X POST "http://127.0.0.1:4096/session/$(cat /tmp/session)/message" \
+  -d '{"agent":"audit","parts":[{"type":"text","text":"Review the result"}]}'
+```
+
+For rollback, restore the previous `server.env` and provider `auth.json`
+contents in the runtime secret directory, then run
+`systemctl start osmium-opencode-reconcile.service`. The service restarts only
+when the file digest changes; invalid replacements fail closed and preserve the
+last valid provider credentials.
+
+### Same-Server Support Profile
+
+Enable the bounded support coordinator explicitly and provide its model:
+
+```nix
+services.osmium.opencodeServer.supportProfile = {
+  enable = true;
+  model = "local/mock";
+  toolProfile = "full"; # or "essential"
+};
+```
+
+This generates the `osmium-support` profile and local `opencode-support` MCP entry. It
+connects only to the guest listener, consumes the mounted password through
+`{env:OPENCODE_SERVER_PASSWORD}`, and sets `OPENCODE_AUTO_SERVE=false`. The
+support profile can inspect, create, and message same-server sessions, including
+sessions created by `opencode attach`; unrelated profiles cannot use this MCP.
+The task store is persisted below the OpenCode data directory. Password rotation
+restarts the parent service and replaces MCP subprocesses. Observation and drift
+outputs include non-secret support state, mark unresolvable host/package inputs,
+and remain review-only. Disable `supportProfile.enable` to roll back without
+deleting sessions or task records.
+
+The generated names can be changed with `supportProfile.name` and
+`supportProfile.mcpName`; `supportProfile.package` may select a reviewed package
+override, while `toolProfile = "essential"` exposes only the core session and
+messaging catalog. The default `full` catalog is required for the complete
+inspection and workflow surface. The MCP endpoint is always the same guest server,
+not a second OpenCode instance. Its runtime password is read from the mounted
+environment file, never from the Nix store, generated JSON, process arguments, or
+reverse-configuration output.
+
+The primary MicroVM check boots the service, exercises the running HTTP API and
+support MCP, and drives a real `opencode attach` client through a PTY. It verifies
+same-server session visibility, deterministic provider responses, runtime-only
+credentials, persistence, and password rotation. Use `toolProfile = "essential"`
+when only the core session and messaging tools are needed; `"full"` is the default.
+
+Reverse configuration is review-only:
+
+```sh
+osmium-opencode-observe > /tmp/opencode-capture.json
+osmium-opencode-drift > /tmp/opencode-drift.json
+```
+
+Outputs omit secret bytes and mark host-only source paths unresolved and
+incomplete. Package source identity, readiness, protocol health, and observed
+runtime status is recorded as runtime provenance; live session facts remain an
+explicit unresolved input because querying that endpoint changes OpenCode's
+bookkeeping. Missing or unrepresentable source/package inputs keep a candidate
+non-activatable. Conversion and capture do not mutate the service, sessions,
+credentials, persistence, or task store. Review
+and supply unresolved inputs before activation. Run the booting checks with:
+
+```sh
+nix build .#checks.x86_64-linux.opencode-server --print-build-logs
+nix build .#checks.x86_64-linux.opencode-server-drift-reverse-configuration --print-build-logs
+nix build .#checks.x86_64-linux.opencode-server-live-capture-reverse-configuration --print-build-logs
+nix build .#checks.x86_64-linux.opencode-mcp-support-profile --print-build-logs
+nix build .#checks.x86_64-linux.opencode-mcp-support-profile-drift-reverse-configuration --print-build-logs
+nix build .#checks.x86_64-linux.opencode-mcp-support-profile-live-capture-reverse-configuration --print-build-logs
+```
+
+The drift check changes the running generated support state, derives a candidate
+from that mutation, checks secret exclusion and non-mutation, and replays the
+represented endpoint/tool profile in a second MicroVM. The live-capture check
+performs real session listing and messaging, captures twice for deterministic
+output, and replays the captured runtime facts in a second MicroVM. To roll back a
+reviewed declaration, remove or disable `supportProfile`, then run the normal
+reconciliation service; existing sessions and persisted task records are retained.
 
 ## Design
 
@@ -26,7 +196,120 @@ to Osmium paths. The migration is repeatable and does not copy secret contents
 into logs or generated configuration.
 
 The examples are exposed as `nixosConfigurations.demo-guest`,
-`nixosConfigurations.gitea-guest`, and `nixosConfigurations.demo-host`.
+`nixosConfigurations.gitea-guest`, `nixosConfigurations.fdroid-guest`, and
+`nixosConfigurations.demo-host`.
+
+## F-Droid Repository
+
+The F-Droid repository service is disabled by default and publishes one
+read-only repository from a persistent guest directory. It accepts prebuilt,
+signed APKs and generates F-Droid metadata and signed indexes at startup with
+the pinned `fdroidserver` package:
+
+```nix
+services.osmium.fdroidRepository = {
+  enable = true;
+  repositoryId = "example";
+  name = "Example Repository";
+  description = "Reviewed applications";
+  baseUrl = "https://repo.example.invalid/repo";
+  guestPort = 8080;
+  hostPort = 38080;
+  signing = {
+    keystoreFile = config.sops.secrets.fdroid-keystore.path;
+    passwordFile = config.sops.secrets.fdroid-password.path;
+    keyAlias = "fdroid";
+  };
+  artifacts.example = {
+    packageName = "org.example.app";
+    versionCode = 1;
+    versionName = "1.0";
+    path = ./org.example.app.apk;
+    sha256 = "<64 hexadecimal characters>";
+  };
+};
+```
+
+`baseUrl` is the client-facing URL ending in `/repo`; the guest HTTP server
+serves that root on `guestPort`, and a MicroVM host forwards `hostPort` to it.
+The service fails closed when the keystore or password file is missing or
+unreadable. Secret contents are read only at runtime and are never placed in
+the Nix store, unit arguments, generated ledger, logs, or reverse-configuration
+output.
+
+The complete repository tree, generation ledger, APKs, indexes, and readiness
+marker persist below `stateDir` (default `/var/lib/fdroid-repository`). Startup
+generation is idempotent once `.ready` exists. Removing an artifact declaration
+does not delete persisted files; destructive cleanup remains an operator
+action. A repository is ready only after generation succeeds and `.ready` is
+present.
+
+Reverse configuration is review-only. Run `observe` or `drift`, then `convert`
+and inspect the deterministic, provenance-bearing candidate. `validate` rejects
+incomplete or ambiguous candidates, while `reconcile` only projects a reviewed
+candidate and never changes the running repository or source files:
+
+```sh
+osmium-fdroid-repository drift --output /tmp/fdroid-drift.json
+osmium-fdroid-repository convert --input /tmp/fdroid-drift.json --output /tmp/fdroid-candidate.json
+osmium-fdroid-repository validate --input /tmp/fdroid-candidate.json
+osmium-fdroid-repository reconcile --input /tmp/fdroid-candidate.json --output /tmp/fdroid-reconciliation.json
+```
+
+Missing signing references, missing artifacts, checksum conflicts, and
+unsupported state remain explicit findings and cannot be activated. Capture
+does not read private keys or passwords.
+
+## Gotify
+
+Gotify is disabled by default. It runs through the native NixOS Gotify module,
+persists `/var/lib/gotify`, and exposes an explicit guest/host HTTP mapping.
+Administrator and user passwords are runtime files readable by `gotify`; they
+are never put in evaluated configuration or the Nix store:
+
+```nix
+services.osmium.gotify = {
+  enable = true;
+  httpPort = 8080;
+  hostHttpPort = 38080;
+  admin = {
+    enable = true;
+    username = "admin";
+    passwordFile = config.sops.secrets.gotify-admin-password.path;
+  };
+  users.alerts = {
+    username = "alerts";
+    passwordFile = config.sops.secrets.gotify-alerts-password.path;
+  };
+  applications.alerts = {
+    owner = "alerts";
+    name = "alerts-client";
+    description = "Application notifications";
+    output = {
+      secretPath = "/var/lib/gotify/credentials/alerts.token";
+      owner = "gotify";
+      group = "gotify";
+      mode = "0400";
+    };
+  };
+};
+```
+
+Application tokens are generated once and written atomically to their protected
+output. The non-secret ledger stores IDs and metadata but never passwords,
+tokens, or reversible digests. A missing token output fails closed and requires
+explicit recovery; application-token rotation is intentionally unsupported.
+Changing a declared user password file updates that user's password during
+reconciliation. Reverse tools are review-only and mark password and token
+outputs unresolved:
+
+```sh
+osmium-gotify capture --output /tmp/gotify-capture.json
+nix build .#checks.x86_64-linux.gotify --print-build-logs
+nix build .#checks.x86_64-linux.gotify-provisioning --print-build-logs
+nix build .#checks.x86_64-linux.gotify-drift-reverse-configuration --print-build-logs
+nix build .#checks.x86_64-linux.gotify-live-capture-reverse-configuration --print-build-logs
+```
 
 ## Gitea
 

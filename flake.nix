@@ -4,6 +4,17 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
 
+    home-manager.url = "github:nix-community/home-manager";
+    home-manager.inputs.nixpkgs.follows = "nixpkgs";
+
+    opencode-nix.url = "github:albertov/opencode-nix";
+    opencode-nix.inputs.nixpkgs.follows = "nixpkgs";
+
+    opencode-mcp-src = {
+      url = "github:AlaeddineMessadi/opencode-mcp/6f1f62fd6c151377e09f4fe95bed58eb48c6196b";
+      flake = false;
+    };
+
     impermanence.url = "github:nix-community/impermanence";
     impermanence.inputs.nixpkgs.follows = "nixpkgs";
 
@@ -14,7 +25,7 @@
     sops-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, impermanence, microvm, sops-nix }:
+  outputs = { self, nixpkgs, home-manager, opencode-nix, opencode-mcp-src, impermanence, microvm, sops-nix }:
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
@@ -70,12 +81,54 @@
           };
         }
       ];
+
+      gotifyGuestModules = [
+        microvm.nixosModules.microvm
+        self.nixosModules.default
+        {
+          networking.hostName = "osmium-gotify";
+          system.stateVersion = "25.05";
+          microvm = {
+            hypervisor = "qemu";
+            vcpu = 2;
+            mem = 768;
+            interfaces = [ { type = "user"; id = "gotify"; mac = "02:00:00:00:00:03"; } ];
+          };
+          services.osmium.gotify = {
+            enable = true;
+            hostHttpPort = 3002;
+            admin = { enable = true; username = "admin"; passwordFile = "/etc/gotify-admin-password"; };
+          };
+        }
+      ];
+
+      fdroidGuestModules = [
+        microvm.nixosModules.microvm
+        self.nixosModules.default
+        {
+          networking.hostName = "osmium-fdroid";
+          system.stateVersion = "25.05";
+          microvm = {
+            hypervisor = "qemu";
+            vcpu = 1;
+            mem = 512;
+            interfaces = [ { type = "user"; id = "fdroid"; mac = "02:00:00:00:00:0b"; } ];
+          };
+        }
+      ];
     in
     {
       nixosModules.default = {
-        imports = [
-          impermanence.nixosModules.impermanence
-          sops-nix.nixosModules.sops
+          imports = [
+            impermanence.nixosModules.impermanence
+            home-manager.nixosModules.home-manager
+            sops-nix.nixosModules.sops
+          {
+            nixpkgs.overlays = nixpkgs.lib.mkDefault [
+                opencode-nix.overlays.default
+                (final: _prev: { opencode-mcp = final.callPackage ./modules/packages/opencode-mcp.nix { src = opencode-mcp-src; }; })
+            ];
+          }
           ./modules
         ];
       };
@@ -122,6 +175,16 @@
         modules = giteaGuestModules;
       };
 
+      nixosConfigurations.gotify-guest = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = gotifyGuestModules;
+      };
+
+      nixosConfigurations.fdroid-guest = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = fdroidGuestModules;
+      };
+
       checks = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
@@ -132,12 +195,92 @@
           };
         in
         {
-          module-evaluation = (nixpkgs.lib.nixosSystem {
+           module-evaluation = (nixpkgs.lib.nixosSystem {
             inherit system;
             modules = guestModules;
-          }).config.system.build.toplevel;
+           }).config.system.build.toplevel;
 
-          persistence = import ./tests/persistence.nix {
+           lldap-module = import ./tests/lldap-module.nix {
+            inherit pkgs;
+            lib = nixpkgs.lib;
+            module = self.nixosModules.default;
+          };
+
+           lldap = import ./tests/lldap.nix {
+             inherit pkgs microvm;
+             lib = nixpkgs.lib;
+             module = self.nixosModules.default;
+           };
+
+           authelia-module = import ./tests/authelia-module.nix {
+             inherit pkgs;
+             lib = nixpkgs.lib;
+             module = self.nixosModules.default;
+           };
+
+            authelia = import ./tests/authelia.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+            };
+
+            authelia-identities = import ./tests/authelia-identities.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+            };
+
+             authelia-proxy-authorization = import ./tests/authelia-proxy-authorization.nix {
+               inherit pkgs microvm;
+               module = self.nixosModules.default;
+             };
+
+             authelia-drift-reverse-configuration = import ./tests/authelia-reverse-configuration.nix {
+               inherit pkgs microvm;
+               module = self.nixosModules.default;
+               mode = "drift";
+             };
+
+             authelia-live-capture-reverse-configuration = import ./tests/authelia-reverse-configuration.nix {
+               inherit pkgs microvm;
+               module = self.nixosModules.default;
+               mode = "live-capture";
+             };
+
+             lldap-authelia-ldap-authentication = import ./tests/lldap-authelia-ldap-authentication.nix {
+               inherit pkgs microvm;
+               module = self.nixosModules.default;
+             };
+
+           lldap-identities = import ./tests/lldap-identities.nix {
+             inherit pkgs microvm;
+             lib = nixpkgs.lib;
+             module = self.nixosModules.default;
+           };
+
+           lldap-identity-removal = import ./tests/lldap-identity-removal.nix {
+              inherit pkgs microvm;
+              lib = nixpkgs.lib;
+              module = self.nixosModules.default;
+            };
+
+           lldap-keycloak-federation = import ./tests/lldap-keycloak-federation.nix {
+             inherit pkgs microvm;
+             lib = nixpkgs.lib;
+             module = self.nixosModules.default;
+           };
+
+           lldap-drift-reverse-configuration = import ./tests/lldap-reverse-configuration.nix {
+             inherit pkgs microvm;
+             module = self.nixosModules.default;
+             mode = "drift";
+           };
+
+           lldap-live-capture-reverse-configuration = import ./tests/lldap-reverse-configuration.nix {
+             inherit pkgs microvm;
+             module = self.nixosModules.default;
+             mode = "live-capture";
+           };
+
+           persistence = import ./tests/persistence.nix {
             inherit pkgs;
             module = self.nixosModules.default;
           };
@@ -171,6 +314,70 @@
               module = self.nixosModules.default;
             };
 
+           gotify = import ./tests/gotify.nix {
+               inherit pkgs microvm;
+               module = self.nixosModules.default;
+             };
+
+            traefik = import ./tests/traefik.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+            };
+
+            traefik-drift-reverse-configuration = import ./tests/traefik-reverse-configuration.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+              mode = "drift";
+            };
+
+            traefik-live-capture-reverse-configuration = import ./tests/traefik-reverse-configuration.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+              mode = "live-capture";
+            };
+
+          keycloak = import ./tests/keycloak.nix {
+            inherit pkgs microvm;
+            lib = nixpkgs.lib;
+            module = self.nixosModules.default;
+          };
+
+          keycloak-provisioning = import ./tests/keycloak-provisioning.nix {
+            inherit pkgs microvm;
+            module = self.nixosModules.default;
+            mode = "provisioning";
+          };
+
+          keycloak-drift-reverse-configuration = import ./tests/keycloak-provisioning.nix {
+            inherit pkgs microvm;
+            module = self.nixosModules.default;
+            mode = "drift-reverse-configuration";
+          };
+
+          keycloak-live-capture-reverse-configuration = import ./tests/keycloak-provisioning.nix {
+            inherit pkgs microvm;
+            module = self.nixosModules.default;
+            mode = "live-capture-reverse-configuration";
+          };
+
+            gotify-provisioning = import ./tests/gotify.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+              mode = "provisioning";
+            };
+
+            gotify-drift-reverse-configuration = import ./tests/gotify.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+              mode = "drift-reverse-configuration";
+            };
+
+            gotify-live-capture-reverse-configuration = import ./tests/gotify.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+              mode = "live-capture-reverse-configuration";
+            };
+
             remote-gitea-capture = import ./tests/remote-gitea-capture.nix {
              inherit pkgs microvm;
              module = self.nixosModules.default;
@@ -186,14 +393,144 @@
              module = self.nixosModules.default;
            };
 
-           gitea-repository-live-capture-reverse-configuration = import ./tests/gitea-repository-live-capture-reverse-configuration.nix {
+            gitea-repository-live-capture-reverse-configuration = import ./tests/gitea-repository-live-capture-reverse-configuration.nix {
              inherit pkgs microvm;
+             module = self.nixosModules.default;
+            };
+
+            fdroid-repository = import ./tests/fdroid-repository.nix {
+              inherit pkgs microvm;
+              lib = nixpkgs.lib;
+              module = self.nixosModules.default;
+            };
+
+            fdroid-repository-drift-reverse-configuration = import ./tests/fdroid-repository-drift-reverse-configuration.nix {
+              inherit pkgs microvm;
+              module = self.nixosModules.default;
+            };
+
+           fdroid-repository-live-capture-reverse-configuration = import ./tests/fdroid-repository-live-capture-reverse-configuration.nix {
+               inherit pkgs microvm;
+               module = self.nixosModules.default;
+              };
+
+           keycloak-sso-gitea = import ./tests/keycloak-sso-gitea.nix {
+             inherit pkgs microvm;
+             lib = nixpkgs.lib;
              module = self.nixosModules.default;
            };
 
-          osmium-rebrand-fresh = rebrand.osmium-rebrand-fresh;
+            keycloak-sso-gotify = import ./tests/keycloak-sso-gotify.nix {
+              inherit pkgs microvm;
+              lib = nixpkgs.lib;
+              module = self.nixosModules.default;
+            };
+
+            keycloak-sso-opencode = import ./tests/keycloak-sso-opencode.nix {
+              inherit pkgs microvm;
+              lib = nixpkgs.lib;
+              module = self.nixosModules.default;
+              opencodeNix = opencode-nix;
+            };
+
+           opencode-server = import ./tests/opencode-server.nix {
+                inherit pkgs microvm;
+                opencodeNix = opencode-nix;
+                lib = nixpkgs.lib;
+                module = self.nixosModules.default;
+          };
+
+          opencode-mcp-package = import ./tests/opencode-mcp-package.nix {
+            inherit pkgs;
+            opencodeMcp = self.packages.${system}.opencode-mcp;
+          };
+
+           opencode-mcp-support-profile = import ./tests/opencode-mcp-support-profile.nix {
+            inherit pkgs microvm;
+            opencodeNix = opencode-nix;
+            opencodeMcp = self.packages.${system}.opencode-mcp;
+            lib = nixpkgs.lib;
+            module = self.nixosModules.default;
+           };
+
+           opencode-mcp-support-profile-diagnostic = import ./tests/opencode-mcp-support-profile.nix {
+             inherit pkgs microvm;
+             lib = nixpkgs.lib;
+             module = self.nixosModules.default;
+             opencodeNix = opencode-nix;
+             opencodeMcp = pkgs.callPackage ./modules/packages/opencode-mcp.nix { src = opencode-mcp-src; };
+             diagnosticOnly = true;
+           };
+          opencode-mcp-support-profile-drift-reverse-configuration = import ./tests/opencode-mcp-support-profile-drift-reverse-configuration.nix {
+            inherit pkgs microvm;
+            opencodeNix = opencode-nix;
+            opencodeMcp = self.packages.${system}.opencode-mcp;
+            lib = nixpkgs.lib;
+            module = self.nixosModules.default;
+          };
+          opencode-mcp-support-profile-live-capture-reverse-configuration = import ./tests/opencode-mcp-support-profile-live-capture-reverse-configuration.nix {
+            inherit pkgs microvm;
+            opencodeNix = opencode-nix;
+            opencodeMcp = self.packages.${system}.opencode-mcp;
+            lib = nixpkgs.lib;
+            module = self.nixosModules.default;
+          };
+
+              opencode-server-drift-reverse-configuration = import ./tests/opencode-server-drift-reverse-configuration.nix {
+                inherit pkgs microvm;
+                opencodeNix = opencode-nix;
+                lib = nixpkgs.lib;
+                module = self.nixosModules.default;
+              };
+
+              opencode-server-live-capture-reverse-configuration = import ./tests/opencode-server-live-capture-reverse-configuration.nix {
+                inherit pkgs microvm;
+                opencodeNix = opencode-nix;
+                lib = nixpkgs.lib;
+                module = self.nixosModules.default;
+              };
+
+               opencode-server-profiles = import ./tests/opencode-server-profiles.nix {
+                inherit pkgs microvm;
+                opencodeNix = opencode-nix;
+                lib = nixpkgs.lib;
+                module = self.nixosModules.default;
+               };
+
+               opencode-server-profiles-evaluation = import ./tests/opencode-server-profiles-evaluation.nix {
+                 inherit pkgs microvm;
+                 opencodeNix = opencode-nix;
+                 lib = nixpkgs.lib;
+                 module = self.nixosModules.default;
+               };
+
+              opencode-server-profiles-drift-reverse-configuration = import ./tests/opencode-server-profiles-drift-reverse-configuration.nix {
+                inherit pkgs microvm;
+                opencodeNix = opencode-nix;
+                lib = nixpkgs.lib;
+                module = self.nixosModules.default;
+              };
+
+              opencode-server-profiles-live-capture-reverse-configuration = import ./tests/opencode-server-profiles-live-capture-reverse-configuration.nix {
+                inherit pkgs microvm;
+                opencodeNix = opencode-nix;
+                lib = nixpkgs.lib;
+                module = self.nixosModules.default;
+              };
+
+             gitea-fdroid-action-publish = import ./tests/gitea-fdroid-action-publish.nix {
+               inherit pkgs microvm;
+               lib = nixpkgs.lib;
+               module = self.nixosModules.default;
+             };
+
+           osmium-rebrand-fresh = rebrand.osmium-rebrand-fresh;
           osmium-rebrand-migration = rebrand.osmium-rebrand-migration;
-        });
+         });
+
+      packages = forAllSystems (system: {
+        opencode-mcp = nixpkgs.legacyPackages.${system}.callPackage ./modules/packages/opencode-mcp.nix { src = opencode-mcp-src; };
+      });
 
       devShells = forAllSystems (system:
         let

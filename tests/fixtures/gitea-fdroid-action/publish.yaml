@@ -1,0 +1,32 @@
+name: publish-apk
+"on":
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+jobs:
+  build-and-publish:
+    runs-on: native
+    steps:
+      - name: Checkout source
+        run: git clone http://127.0.0.1:3000/action-publisher/action-source .
+      - name: Build and publish signed APK
+        run: |
+          set -eu
+          touch /var/lib/gitea-runner/action/osmium-action-started
+          export ANDROID_HOME=${ANDROID_HOME:?ANDROID_HOME is not set}
+          export PATH="$ANDROID_HOME/libexec/android-sdk/build-tools/35.0.0:$PATH"
+          mkdir -p "$RUNNER_TEMP/apk"
+          cat AndroidManifest.xml > "$RUNNER_TEMP/apk/AndroidManifest.xml"
+          aapt2 link --manifest "$RUNNER_TEMP/apk/AndroidManifest.xml" \
+            --min-sdk-version 23 --target-sdk-version 35 --version-code 1 \
+            --version-name 1.0 \
+            -I "$ANDROID_HOME/libexec/android-sdk/platforms/android-35/android.jar" \
+            -o "$RUNNER_TEMP/apk/unsigned.apk"
+          apksigner sign --ks /run/gitea-runner/apk.keystore \
+            --ks-pass file:/run/gitea-runner/apk.password \
+            --ks-key-alias actiontest "$RUNNER_TEMP/apk/unsigned.apk"
+          apksigner verify --print-certs "$RUNNER_TEMP/apk/unsigned.apk"
+          install -m 0644 "$RUNNER_TEMP/apk/unsigned.apk" "$RUNNER_TEMP/actiontest_1.apk"
+            ssh -4 -o BatchMode=yes -o UserKnownHostsFile=/run/gitea-runner/fdroid_known_hosts \
+            -i /run/gitea-runner/publish.key fdroid-publisher@fdroid \
+            'cat > /var/lib/fdroid-repository/incoming/org.osmium.actiontest_1.apk' < "$RUNNER_TEMP/actiontest_1.apk"

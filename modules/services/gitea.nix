@@ -11,43 +11,158 @@ let
   repositoryDefinitions = lib.attrValues cfg.repositories;
   credentialDefinitions = lib.attrValues cfg.credentials;
   supportedCredentialScopes = [
-    "read:user" "write:user"
-    "read:repository" "write:repository"
-    "read:organization" "write:organization"
-    "read:issue" "write:issue"
-    "read:notification" "write:notification"
-    "read:package" "write:package"
-    "read:misc" "write:misc"
+    "read:user"
+    "write:user"
+    "read:repository"
+    "write:repository"
+    "read:organization"
+    "write:organization"
+    "read:issue"
+    "write:issue"
+    "read:notification"
+    "write:notification"
+    "read:package"
+    "write:package"
+    "read:misc"
+    "write:misc"
   ];
   identityReconciliationEnabled = cfg.users != { } || cfg.organizations != { };
   repositoryReconciliationEnabled = cfg.repositories != { };
   credentialReconciliationEnabled = cfg.credentials != { };
   credentialLedgerFile = "${cfg.stateDir}/.osmium-credential-ledger.json";
+  ssoStateFile = "${cfg.stateDir}/.osmium-keycloak-sso.json";
+  ssoClient =
+    if cfg.sso.enable && builtins.hasAttr cfg.sso.keycloak.client config.services.osmium.keycloak.clients
+    then config.services.osmium.keycloak.clients.${cfg.sso.keycloak.client}
+    else null;
+  ssoIssuer = if cfg.sso.enable then lib.removeSuffix "/" config.services.osmium.keycloak.issuer else "";
+  ssoDiscoveryUrl = if cfg.sso.enable then "${ssoIssuer}/realms/${cfg.sso.keycloak.realm}/.well-known/openid-configuration" else "";
+  ssoRealmIssuer = if cfg.sso.enable then "${ssoIssuer}/realms/${cfg.sso.keycloak.realm}" else "";
+  ssoTokenUrl = if cfg.sso.enable then "${ssoIssuer}/realms/${cfg.sso.keycloak.realm}/protocol/openid-connect/token" else "";
+  ssoScopeArgs = if cfg.sso.enable then lib.concatMapStringsSep " " (scope: "--scopes ${lib.escapeShellArg scope}") cfg.sso.scopes else "";
+  ssoRequiredClaimArgs =
+    if cfg.sso.enable && cfg.sso.requiredClaim.name != null then
+      "--required-claim-name ${lib.escapeShellArg cfg.sso.requiredClaim.name} --required-claim-value ${lib.escapeShellArg cfg.sso.requiredClaim.value}"
+    else "";
+  ssoGroupClaimArgs =
+    if cfg.sso.enable && cfg.sso.groupClaimName != null then
+      "--group-claim-name ${lib.escapeShellArg cfg.sso.groupClaimName}"
+    else "";
+  ssoRestrictedGroupArgs =
+    if cfg.sso.enable && cfg.sso.restrictedGroup != null then
+      "--restricted-group ${lib.escapeShellArg cfg.sso.restrictedGroup}"
+    else "";
+  ssoSourceArgs =
+    if cfg.sso.enable then ''
+      --name ${lib.escapeShellArg cfg.sso.sourceName} \
+      --provider openidConnect \
+      --key ${lib.escapeShellArg ssoClient.clientId} \
+      --auto-discover-url ${lib.escapeShellArg ssoDiscoveryUrl} \
+      --full-name-claim-name ${lib.escapeShellArg cfg.sso.fullNameClaimName} \
+      --skip-local-2fa false \
+       ${ssoScopeArgs} ${ssoRequiredClaimArgs} ${ssoGroupClaimArgs} ${ssoRestrictedGroupArgs} \
+    '' else "";
+  ssoReconciliation =
+    if cfg.sso.enable then
+      pkgs.writeShellScript "osmium-gitea-keycloak-sso" ''
+        set -eu
+        PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.gawk pkgs.gitea pkgs.jq ]}
+        state=${lib.escapeShellArg ssoStateFile}
+        secret_file=${lib.escapeShellArg cfg.sso.clientSecretFile}
+        config_file=${lib.escapeShellArg "${cfg.stateDir}/custom/conf/app.ini"}
+        client_id=${lib.escapeShellArg ssoClient.clientId}
+        discovery_url=${lib.escapeShellArg ssoDiscoveryUrl}
+        token_url=${lib.escapeShellArg ssoTokenUrl}
+        source_name=${lib.escapeShellArg cfg.sso.sourceName}
+        [ -r "$secret_file" ] || { echo "Gitea Keycloak SSO client secret file is unavailable" >&2; exit 1; }
+        secret=$(cat "$secret_file")
+        [ -n "$secret" ] || { echo "Gitea Keycloak SSO client secret file is empty" >&2; exit 1; }
+        curl --fail --silent --show-error "$discovery_url" | jq -e --arg issuer ${lib.escapeShellArg ssoRealmIssuer} '(.issuer | rtrimstr("/")) == $issuer' >/dev/null || {
+          echo "Gitea Keycloak SSO discovery issuer does not match the declaration" >&2
+          exit 1
+        }
+        curl --fail --silent --show-error -u "$client_id:$secret" \
+          -H 'Content-Type: application/x-www-form-urlencoded' \
+          -d grant_type=client_credentials -d scope=openid "$token_url" | jq -e '.access_token != null' >/dev/null || {
+          echo "Gitea Keycloak SSO replacement client secret failed live validation" >&2
+          exit 1
+        }
+
+        salt=
+        source_id=
+        recorded_fingerprint=
+        if [ -r "$state" ]; then
+          jq -e '.schema_version == 1 and (.source_id | type == "number") and (.salt | type == "string") and (.fingerprint | type == "string")' "$state" >/dev/null || {
+            echo "Gitea Keycloak SSO state is invalid; refusing adoption" >&2
+            exit 1
+          }
+          source_id=$(jq -r '.source_id' "$state")
+          salt=$(jq -r '.salt' "$state")
+          recorded_fingerprint=$(jq -r '.fingerprint' "$state")
+        else
+          salt=$(head -c 32 /dev/urandom | base64 -w 0)
+        fi
+        fingerprint=$(printf '%s%s' "$salt" "$secret" | sha256sum | cut -d ' ' -f 1)
+        source_command=(gitea --config "$config_file" admin auth)
+        if [ -n "$source_id" ]; then
+           if ! ''${source_command[@]} list | awk -v id="$source_id" 'NR > 1 && $1 + 0 == id { found=1 } END { exit !found }'; then
+            echo "Managed Gitea Keycloak authentication source is missing; refusing replacement" >&2
+            exit 1
+          fi
+        fi
+        if [ -z "$source_id" ]; then
+          ''${source_command[@]} add-oauth ${ssoSourceArgs} --secret "$secret"
+          source_id=$(''${source_command[@]} list | awk -v name="$source_name" 'NR > 1 && $2 == name { print $1; exit }')
+          case "$source_id" in
+            *[!0-9]*) echo "Gitea did not return the managed Keycloak authentication source identity" >&2; exit 1 ;;
+          esac
+          [ -n "$source_id" ] || { echo "Gitea did not return the managed Keycloak authentication source identity" >&2; exit 1; }
+        elif [ "$fingerprint" != "$recorded_fingerprint" ]; then
+          ''${source_command[@]} update-oauth --id "$source_id" ${ssoSourceArgs} --secret "$secret"
+        fi
+        temporary=$(mktemp "''${state}.XXXXXX")
+        trap 'rm -f "$temporary"' EXIT
+        jq -cn --argjson source_id "$source_id" --arg source_name "$source_name" --arg client_id "$client_id" \
+          --arg discovery_url "$discovery_url" --arg salt "$salt" --arg fingerprint "$fingerprint" \
+          '{schema_version:1,source_id:$source_id,source_name:$source_name,provider:"openidConnect",client_id:$client_id,discovery_url:$discovery_url,salt:$salt,fingerprint:$fingerprint}' > "$temporary"
+        chown gitea:gitea "$temporary"
+        chmod 0640 "$temporary"
+        mv -f "$temporary" "$state"
+      '' else null;
   declaredCredentials = builtins.toJSON cfg.credentials;
-  credentialOutputFiles = lib.concatMap (credential:
+  credentialOutputFiles = lib.concatMap
+    (credential:
     [ credential.output.secretPath ] ++ lib.optional (credential.output.publicPath != null) credential.output.publicPath
-  ) credentialDefinitions;
-  persistentCredentialOutputFiles = lib.concatMap (credential:
+    )
+    credentialDefinitions;
+  persistentCredentialOutputFiles = lib.concatMap
+    (credential:
     if credential.output.persistent then
       [ credential.output.secretPath ] ++ lib.optional (credential.output.publicPath != null) credential.output.publicPath
     else
       [ ]
-  ) credentialDefinitions;
+    )
+    credentialDefinitions;
   adminCredentialFile = cfg.admin.passwordFile;
   adminRotationPasswordFile = if cfg.admin.rotation.passwordFile == null then "/dev/null" else cfg.admin.rotation.passwordFile;
   driftHistoryFile = "${cfg.stateDir}/.osmium-drift-history";
   driftReportFile = if cfg.driftDetection.reportFile == null then "" else cfg.driftDetection.reportFile;
-  declaredDriftUsers = builtins.toJSON (lib.mapAttrsToList (_: user: {
+  declaredDriftUsers = builtins.toJSON (lib.mapAttrsToList
+    (_: user: {
     username = user.username;
     email = user.email;
-  }) cfg.users);
-  declaredDriftOrganizations = builtins.toJSON (lib.mapAttrsToList (_: organization: {
+    })
+    cfg.users);
+  declaredDriftOrganizations = builtins.toJSON (lib.mapAttrsToList
+    (_: organization: {
     name = organization.name;
     owner = organization.owner;
     description = organization.description;
     visibility = organization.visibility;
-  }) cfg.organizations);
-  declaredDriftRepositories = builtins.toJSON (lib.mapAttrsToList (_: repository: {
+    })
+    cfg.organizations);
+  declaredDriftRepositories = builtins.toJSON (lib.mapAttrsToList
+    (_: repository: {
     owner_kind = if repository.owner.user != null then "user" else "organization";
     owner = if repository.owner.user != null then repository.owner.user else repository.owner.organization;
     name = repository.name;
@@ -58,7 +173,8 @@ let
     issues = repository.issues;
     wiki = repository.wiki;
     pull_requests = repository.pullRequests;
-  }) cfg.repositories);
+    })
+    cfg.repositories);
   exportFilter = pkgs.writeText "osmium-gitea-export-filter.jq" ''
     "# Generated Gitea configuration candidate; review before activation.",
     "# Export is read-only and does not adopt records.",
@@ -410,7 +526,8 @@ let
       exit 1
     fi
   '';
-  userReconciliation = lib.concatMapStringsSep "\n" (name:
+  userReconciliation = lib.concatMapStringsSep "\n"
+    (name:
     let
       user = cfg.users.${name};
       state = "${cfg.stateDir}/.osmium-user-${name}";
@@ -467,8 +584,10 @@ let
         mv "$user_tmp" ${lib.escapeShellArg state}
         trap - EXIT
       fi
-    '') (lib.attrNames cfg.users);
-  organizationReconciliation = lib.concatMapStringsSep "\n" (name:
+      '')
+    (lib.attrNames cfg.users);
+  organizationReconciliation = lib.concatMapStringsSep "\n"
+    (name:
     let
       organization = cfg.organizations.${name};
       owner = lib.findFirst (user: user.username == organization.owner) null identityDefinitions;
@@ -506,8 +625,10 @@ let
           exit 1
           ;;
       esac
-    '') (lib.attrNames cfg.organizations);
-  repositoryReconciliation = lib.concatMapStringsSep "\n" (name:
+      '')
+    (lib.attrNames cfg.organizations);
+  repositoryReconciliation = lib.concatMapStringsSep "\n"
+    (name:
     let
       repository = cfg.repositories.${name};
       ownerKind = if repository.owner.user != null then "user" else "organization";
@@ -548,7 +669,8 @@ let
           exit 1
           ;;
       esac
-    '') (lib.attrNames cfg.repositories);
+      '')
+    (lib.attrNames cfg.repositories);
   credentialReconciliation = ''
     set -eu
     trap 'echo "Gitea credential reconciliation failed at line $LINENO" >&2' ERR
@@ -1197,6 +1319,74 @@ in
         };
       };
     };
+
+    sso = {
+      enable = lib.mkEnableOption "native Keycloak OpenID Connect authentication for Gitea";
+
+      keycloak = {
+        realm = lib.mkOption {
+          type = lib.types.strMatching "[A-Za-z0-9._-]+";
+          description = "Stable Osmium Keycloak realm declaration key.";
+        };
+        client = lib.mkOption {
+          type = lib.types.str;
+          description = "Stable Osmium Keycloak confidential-client declaration key.";
+        };
+      };
+
+      sourceName = lib.mkOption {
+        type = lib.types.strMatching "[A-Za-z0-9._-]+";
+        default = "Keycloak";
+        description = "Gitea authentication-source name shown on the login page.";
+      };
+
+      callbackUrl = lib.mkOption {
+        type = lib.types.strMatching "https?://[^[:space:]]+";
+        description = "Exact Gitea OAuth callback URL declared on the Keycloak client.";
+      };
+
+      clientSecretFile = lib.mkOption {
+        type = lib.types.path;
+        description = "Runtime file containing the same Keycloak client secret as the declared client.";
+      };
+
+      scopes = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "openid" "profile" "email" ];
+        description = "OIDC scopes requested by Gitea.";
+      };
+
+      fullNameClaimName = lib.mkOption {
+        type = lib.types.str;
+        default = "name";
+        description = "OIDC claim used for the Gitea user's full name.";
+      };
+
+      requiredClaim = {
+        name = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = "Optional OIDC claim that must equal requiredClaim.value for login.";
+        };
+        value = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = "Required value for the configured OIDC claim.";
+        };
+      };
+
+      groupClaimName = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Optional OIDC claim containing group names for Gitea policy.";
+      };
+
+      restrictedGroup = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Optional group whose members receive Gitea restricted status.";
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable ({
@@ -1250,54 +1440,65 @@ in
         message = "Declarative Gitea usernames may contain only letters, numbers, dots, underscores, and hyphens.";
       }
       {
-        assertion = lib.all (organization:
+        assertion = lib.all
+          (organization:
           builtins.match "[A-Za-z0-9._-]+" organization.name != null
           && lib.any (user: user.username == organization.owner) identityDefinitions
-        ) (lib.attrValues cfg.organizations);
+          )
+          (lib.attrValues cfg.organizations);
         message = "Declarative Gitea organizations require safe names and declared user owners.";
       }
       {
-        assertion = lib.all (repository:
+        assertion = lib.all
+          (repository:
           (repository.owner.user != null) != (repository.owner.organization != null)
-        ) repositoryDefinitions;
+          )
+          repositoryDefinitions;
         message = "Declarative Gitea repositories require exactly one user or organization owner.";
       }
       {
-        assertion = lib.all (repository:
+        assertion = lib.all
+          (repository:
           let
             owner = if repository.owner.user != null then repository.owner.user else repository.owner.organization;
           in
           builtins.match "[A-Za-z0-9._-]+" owner != null
           && builtins.match "[A-Za-z0-9._-]+" repository.name != null
-        ) repositoryDefinitions;
+          )
+          repositoryDefinitions;
         message = "Declarative Gitea repository owners and names may contain only letters, numbers, dots, underscores, and hyphens.";
       }
       {
         assertion =
           let
-            identities = map (repository:
+            identities = map
+              (repository:
               let
                 ownerKind = if repository.owner.user != null then "user" else "organization";
                 ownerName = if repository.owner.user != null then repository.owner.user else repository.owner.organization;
               in
-              "${ownerKind}:${ownerName}:${repository.name}") repositoryDefinitions;
+                "${ownerKind}:${ownerName}:${repository.name}")
+              repositoryDefinitions;
           in
           lib.length (lib.unique identities) == lib.length identities;
         message = "Declarative Gitea repository owner and name identities must be unique.";
       }
       {
-        assertion = lib.all (credential:
+        assertion = lib.all
+          (credential:
           (credential.username == null || builtins.match "[A-Za-z0-9._-]+" credential.username != null)
           && (credential.repository == null || (
             (credential.repository.owner.user == null) != (credential.repository.owner.organization == null)
             && builtins.match "[A-Za-z0-9._-]+" (if credential.repository.owner.user != null then credential.repository.owner.user else credential.repository.owner.organization) != null
             && builtins.match "[A-Za-z0-9._-]+" credential.repository.name != null
           ))
-        ) credentialDefinitions;
+          )
+          credentialDefinitions;
         message = "Gitea credential owners, repository names, and usernames may contain only letters, numbers, dots, underscores, and hyphens.";
       }
       {
-        assertion = lib.all (credential:
+        assertion = lib.all
+          (credential:
           let
             hasUser = credential.username != null;
             hasRepository = credential.repository != null;
@@ -1307,54 +1508,96 @@ in
           || (credential.kind == "deploy-key" && hasRepository && !hasUser && !hasApplication)
           || (credential.kind == "oauth-application" && hasApplication && !hasRepository)
           || (credential.kind == "oauth-token" && hasUser && credential.flow != null && !hasRepository && !hasApplication)
-        ) credentialDefinitions;
+          )
+          credentialDefinitions;
         message = "Each Gitea credential must provide exactly the fields required by its kind; organizational credentials are unsupported.";
       }
       {
-        assertion = lib.length (lib.unique (map (credential:
+        assertion = lib.length
+          (lib.unique (map
+            (credential:
           if credential.kind == "deploy-key" then
             "deploy-key:${if credential.repository.owner.user != null then "user" else "organization"}:${if credential.repository.owner.user != null then credential.repository.owner.user else credential.repository.owner.organization}:${credential.repository.name}"
           else if credential.kind == "oauth-application" then
             "oauth-application:${credential.applicationName}"
           else
             "${credential.kind}:${credential.username}"
-        ) credentialDefinitions)) == lib.length credentialDefinitions;
+            )
+            credentialDefinitions)) == lib.length credentialDefinitions;
         message = "Gitea credential resource identities must be unique.";
       }
       {
-        assertion = lib.all (credential:
+        assertion = lib.all
+          (credential:
           lib.all (scope: lib.elem scope supportedCredentialScopes) credential.scopes
-        ) credentialDefinitions;
+          )
+          credentialDefinitions;
         message = "Gitea credential scopes must be supported non-administrator scopes.";
       }
       {
-        assertion = lib.all (credential:
+        assertion = lib.all
+          (credential:
           credential.username == null || credential.username != cfg.admin.username
-        ) credentialDefinitions;
+          )
+          credentialDefinitions;
         message = "Gitea credentials must not target the administrator account.";
       }
       {
-        assertion = lib.all (credential:
+        assertion = lib.all
+          (credential:
           let
             paths = [ credential.output.secretPath ] ++ lib.optional (credential.output.publicPath != null) credential.output.publicPath;
           in
-          lib.all (path:
+            lib.all
+              (path:
             lib.any (prefix: lib.hasPrefix prefix path) [ "/var/lib/gitea/" "/etc/gitea/" "/run/gitea/" ]
-          ) paths
-        ) credentialDefinitions;
+              )
+              paths
+          )
+          credentialDefinitions;
         message = "Gitea credential output paths must be below /var/lib/gitea, /etc/gitea, or /run/gitea.";
       }
       {
-        assertion = lib.all (credential:
+        assertion = lib.all
+          (credential:
           builtins.match "0[0-7]{3}" credential.output.mode != null
           && lib.hasPrefix "0" credential.output.mode
           && builtins.match "0[0-7][0-7][0-7]" credential.output.mode != null
-        ) credentialDefinitions;
+          )
+          credentialDefinitions;
         message = "Gitea credential output modes must be four-digit restrictive octal modes.";
       }
       {
         assertion = !credentialReconciliationEnabled || (cfg.admin.enable && adminCredentialFile != null);
         message = "Declarative Gitea credentials require administrator bootstrap and an administrator credential file.";
+      }
+      {
+        assertion = !cfg.sso.enable || config.services.osmium.keycloak.enable;
+        message = "Gitea Keycloak SSO requires the Osmium Keycloak module to be enabled in the same declaration.";
+      }
+      {
+        assertion = !cfg.sso.enable || ssoClient != null;
+        message = "Gitea Keycloak SSO must reference an existing Osmium Keycloak client declaration.";
+      }
+      {
+        assertion = !cfg.sso.enable || (ssoClient != null && ssoClient.realm == cfg.sso.keycloak.realm && !ssoClient.public && ssoClient.secretFile == cfg.sso.clientSecretFile);
+        message = "Gitea Keycloak SSO requires a confidential client in the selected realm with the same runtime secret-file reference.";
+      }
+      {
+        assertion = !cfg.sso.enable || (ssoClient != null && lib.elem "authorization-code" ssoClient.flows && lib.elem cfg.sso.callbackUrl ssoClient.redirectUris);
+        message = "Gitea Keycloak SSO callbackUrl must be an exact authorization-code redirect URI on the selected Keycloak client.";
+      }
+      {
+        assertion = !cfg.sso.enable || ((cfg.sso.requiredClaim.name == null) == (cfg.sso.requiredClaim.value == null));
+        message = "Gitea Keycloak SSO requiredClaim.name and requiredClaim.value must be provided together.";
+      }
+      {
+        assertion = !cfg.sso.enable || cfg.sso.groupClaimName != null || cfg.sso.restrictedGroup == null;
+        message = "Gitea Keycloak SSO restrictedGroup requires groupClaimName.";
+      }
+      {
+        assertion = !cfg.sso.enable || !lib.hasPrefix "http://" cfg.sso.callbackUrl || config.services.osmium.keycloak.allowInsecureHttp;
+        message = "Gitea Keycloak SSO callbackUrl must use HTTPS outside isolated insecure-HTTP tests.";
       }
     ];
 
@@ -1409,7 +1652,6 @@ in
       unitConfig.ConditionPathExists = "!${adminBootstrapMarker}";
       serviceConfig = {
         Type = "oneshot";
-        RemainAfterExit = true;
         User = "gitea";
         Group = "gitea";
         UMask = "0077";
@@ -1438,6 +1680,7 @@ in
       requires = [ "gitea.service" "osmium-gitea-admin-bootstrap.service" ];
       serviceConfig = {
         Type = "oneshot";
+        RemainAfterExit = true;
         User = "gitea";
         Group = "gitea";
         UMask = "0077";
@@ -1601,6 +1844,35 @@ in
     system.activationScripts.osmium-gitea-credentials = lib.mkIf credentialReconciliationEnabled {
       text = ''
         ${pkgs.systemd}/bin/systemctl restart osmium-gitea-credentials.service || true
+      '';
+    };
+
+    systemd.services.osmium-gitea-keycloak-sso = lib.mkIf cfg.sso.enable {
+      description = "Reconcile the native Gitea Keycloak OpenID Connect source";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "gitea.service" ] ++ lib.optional config.services.osmium.keycloak.enable "osmium-keycloak-reconcile.service";
+      requires = [ "gitea.service" ] ++ lib.optional config.services.osmium.keycloak.enable "osmium-keycloak-reconcile.service";
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = "gitea";
+        Group = "gitea";
+        UMask = "0077";
+        ExecStart = ssoReconciliation;
+      };
+    };
+
+    systemd.paths.osmium-gitea-keycloak-sso = lib.mkIf cfg.sso.enable {
+      wantedBy = [ "multi-user.target" ];
+      pathConfig = {
+        PathChanged = [ cfg.sso.clientSecretFile ];
+        Unit = "osmium-gitea-keycloak-sso.service";
+      };
+    };
+
+    system.activationScripts.osmium-gitea-keycloak-sso = lib.mkIf cfg.sso.enable {
+      text = ''
+        ${pkgs.systemd}/bin/systemctl restart osmium-gitea-keycloak-sso.service || true
       '';
     };
 
